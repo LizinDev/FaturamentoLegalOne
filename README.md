@@ -160,7 +160,7 @@ Situações registradas no ledger:
 | Situação | Significado |
 | --- | --- |
 | `ok` | Tarefa cadastrada |
-| `ja_existia` | O processo já tinha uma tarefa `FATURAMENTO FINAL` |
+| `ja_existia` | O processo já tinha a tarefa daquele perfil |
 | `nao_encontrado` | Nenhuma pasta com esse número exato no Legal One |
 | `ambiguo` | Mais de uma pasta do tipo Processo com o mesmo número |
 | `erro` | Falha no meio do caminho (o motivo fica na coluna `DETALHE`) |
@@ -176,6 +176,11 @@ cadastrado responde "já tinha a tarefa", e isso é verdade daquela passada — 
 sobrescrever apagaria o registro de que fomos nós que cadastramos, e em que dia.
 Como a planilha diária se apoia nisso, a situação, a data e o detalhe originais
 são preservados.
+
+Pela mesma razão, **valor vazio nunca sobrescreve valor preenchido**. Nem todo
+caminho tem todos os dados em mãos — um erro no meio do cadastro não sabe o tipo
+de cobrança, por exemplo —, e sem essa regra a segunda passada esvaziaria as
+colunas que a primeira tinha preenchido.
 
 ## Como os erros são tratados
 
@@ -202,11 +207,12 @@ processo e recria, sem perder a rodada.
 redirecionar para o login, e aí a busca passa a não achar nada. Depois de 25
 seguidos o programa para, descarta esses registros suspeitos do ledger e avisa.
 É o caso mais perigoso de uma rodada sem supervisão, porque falha parecendo
-sucesso.
+sucesso. O descarte só alcança registros pendentes: `ok` e `ja_existia` são
+trabalho confirmado no Legal One e nunca são apagados.
 
 **`Ctrl+C`** — encerra limpo, exporta os relatórios e mantém o progresso.
 
-Em qualquer saída — inclusive erro fatal ou `Ctrl+C` — os dois CSVs são
+Em qualquer saída — inclusive erro fatal ou `Ctrl+C` — os relatórios são
 exportados antes de terminar.
 
 ### O que vigiar durante a rodada
@@ -232,31 +238,40 @@ situação, id no Legal One, detalhe, tipo de cobrança, status na planilha,
 origem e quando rodou.
 
 **`data/nao_encontrados.csv`** — só o que precisa de conferência manual
-(`nao_encontrado` e `ambiguo`), ordenado pela posição na planilha. Colunas:
+(`nao_encontrado` e `ambiguo`), ordenado pela posição na planilha. Sai do ledger,
+então é **acumulado**: traz o que todas as rodadas já levantaram, e não só a
+última. Colunas:
 
 | Coluna | Conteúdo |
 | --- | --- |
 | `PROCESSO` | O número como está na planilha |
 | `PESQUISADO_COMO` | Só preenchido quando o número foi corrigido antes de buscar |
+| `TAREFA` | Qual das duas tarefas essa rodada tentava cadastrar |
 | `SITUACAO` | `nao_encontrado` ou `ambiguo` |
 | `MOTIVO` | Por que falhou (sem resultado, só recurso, número fora do padrão…) |
 | `TIPO_COBRANCA` | Ajuda a priorizar o que conferir |
 | `STATUS_PLANILHA` | O que a planilha dizia do Legal One |
 | `ORIGEM` | Aba e linha exatas (ex.: `2026!L14; 2025!L802`) |
 
-Essa lista é gerada **também em simulação**, então dá para levantar tudo que não
-existe no Legal One sem cadastrar nada:
+**`data/nao_encontrados_simulacao.csv`** — a mesma lista, quando a rodada é
+simulação. Mesmas colunas, arquivo separado: uma simulação só enxerga a própria
+fila, e escrever no arquivo de cima apagaria a lista acumulada das rodadas de
+verdade. É assim que se levanta o que não existe no Legal One sem cadastrar nada:
 
 ```bash
 python main.py --planilha "C:/.../Processos.xlsx" --so-buscar
 ```
 
 **`data/cadastrados_AAAA-MM-DD.xlsx`** — a planilha Excel do dia, gerada
-automaticamente ao fim de toda rodada real. Traz só os processos que *esta
-instalação cadastrou naquele dia*, com cabeçalho formatado, painel congelado e
-autofiltro. Colunas: processo, id no Legal One, os quatro valores da tarefa
-(descrição, status, tipo, responsável), tipo de cobrança, status na planilha,
-origem e o horário do cadastro.
+automaticamente ao fim de toda rodada real que tenha cadastrado alguma coisa.
+Traz só os processos que *esta instalação cadastrou naquele dia*, com cabeçalho
+formatado, painel congelado e autofiltro. Colunas: processo, id no Legal One, os
+quatro valores da tarefa (descrição, status, tipo, responsável), tipo de
+cobrança, status na planilha, origem e o horário do cadastro.
+
+Uma rodada que atravessa a meia-noite gera **as duas** planilhas, cada uma só com
+o que foi cadastrado naquele dia. Se as duas tarefas rodarem no mesmo dia, as
+duas aparecem no mesmo arquivo, separadas pela coluna `TAREFA`.
 
 Os valores fixos da tarefa são repetidos em toda linha de propósito: assim a
 planilha se explica sozinha para quem recebe e não acompanhou a execução.
@@ -342,5 +357,9 @@ Para os ~12 mil processos únicos da planilha, o fluxo completo fica na casa das
 30 horas. Dá para rodar em pedaços — a retomada é automática.
 
 ## Versão
+
+1.2.0 — coluna vazia não sobrescreve mais coluna preenchida no ledger; lista de
+conferência acumulada (com a de simulação em arquivo próprio); planilha do dia
+para cada dia que a rodada tocar; disjuntor não apaga trabalho confirmado.
 
 1.1.0 — dois perfis de tarefa e ledger indexado por (processo, tarefa).

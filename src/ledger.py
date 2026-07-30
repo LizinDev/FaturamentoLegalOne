@@ -40,12 +40,17 @@ CREATE TABLE IF NOT EXISTS processos (
     origem          TEXT,
     tipo_cobranca   TEXT,
     status_planilha TEXT,
+    cnj_original    TEXT,
     quando          TEXT NOT NULL,
     PRIMARY KEY (cnj, tarefa)
 );
 CREATE INDEX IF NOT EXISTS idx_situacao ON processos(situacao);
 CREATE INDEX IF NOT EXISTS idx_tarefa ON processos(tarefa);
 """
+
+# Colunas acrescentadas depois que ja havia ledger em producao. Sao opcionais,
+# entao entram com ALTER TABLE em vez de recriar a tabela.
+COLUNAS_NOVAS = [("cnj_original", "TEXT")]
 
 # Antes de existirem duas tarefas, o ledger so guardava FATURAMENTO FINAL.
 TAREFA_HISTORICA = "FATURAMENTO FINAL"
@@ -74,7 +79,9 @@ class Ledger:
             return
 
         colunas = [c[1] for c in self.con.execute("PRAGMA table_info(processos)")]
+
         if "tarefa" in colunas:
+            self._acrescentar_colunas(colunas)
             return
 
         logger.info("Migrando ledger para o esquema com chave (processo, tarefa)")
@@ -98,6 +105,16 @@ class Ledger:
         logger.info("Ledger migrado: %d registro(s) atribuidos a %r",
                     movidos, TAREFA_HISTORICA)
 
+    def _acrescentar_colunas(self, colunas: list[str]) -> None:
+        """Poe no lugar colunas opcionais que o ledger ainda nao tenha."""
+        for nome, tipo in COLUNAS_NOVAS:
+            if nome not in colunas:
+                self.con.execute(
+                    f"ALTER TABLE processos ADD COLUMN {nome} {tipo}"
+                )
+                logger.info("Ledger: coluna %r acrescentada", nome)
+        self.con.commit()
+
     def registrar(
         self,
         cnj: str,
@@ -108,16 +125,23 @@ class Ledger:
         origem: str = "",
         tipo_cobranca: str = "",
         status_planilha: str = "",
+        cnj_original: str = "",
     ) -> None:
-        # Reprocessar um processo ja cadastrado devolve "ja_existia" — que e
-        # verdade daquela passada, mas apagaria o registro de que fomos nos que
-        # cadastramos, e em que dia. Como o relatorio diario se apoia nisso, um
-        # 'ok' nunca e rebaixado: mantem situacao, data e detalhe originais.
+        # Duas protecoes na reescrita de um registro que ja existe:
+        #
+        # 1. Reprocessar um processo ja cadastrado devolve "ja_existia" — que e
+        #    verdade daquela passada, mas apagaria o registro de que fomos nos
+        #    que cadastramos, e em que dia. Como o relatorio diario se apoia
+        #    nisso, um 'ok' nunca e rebaixado: mantem situacao, data e detalhe.
+        # 2. Nem todo caminho tem todos os dados em maos (um erro no meio do
+        #    cadastro nao sabe o tipo de cobranca, por exemplo). Valor vazio
+        #    nunca sobrescreve valor preenchido, senao a segunda passada
+        #    esvaziaria as colunas que a primeira tinha preenchido.
         self.con.execute(
             "INSERT INTO processos "
             "  (cnj, tarefa, situacao, id_legalone, detalhe, origem, "
-            "   tipo_cobranca, status_planilha, quando) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "   tipo_cobranca, status_planilha, cnj_original, quando) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(cnj, tarefa) DO UPDATE SET "
             "  situacao = CASE WHEN processos.situacao = 'ok' "
             "                   AND excluded.situacao = 'ja_existia' "
@@ -128,20 +152,21 @@ class Ledger:
             "  detalhe  = CASE WHEN processos.situacao = 'ok' "
             "                   AND excluded.situacao = 'ja_existia' "
             "                  THEN processos.detalhe ELSE excluded.detalhe END, "
-            "  id_legalone=excluded.id_legalone, origem=excluded.origem, "
-            "  tipo_cobranca=excluded.tipo_cobranca, "
-            "  status_planilha=excluded.status_planilha",
+            "  id_legalone     = COALESCE(NULLIF(excluded.id_legalone, ''), "
+            "                             processos.id_legalone), "
+            "  origem          = COALESCE(NULLIF(excluded.origem, ''), "
+            "                             processos.origem), "
+            "  tipo_cobranca   = COALESCE(NULLIF(excluded.tipo_cobranca, ''), "
+            "                             processos.tipo_cobranca), "
+            "  status_planilha = COALESCE(NULLIF(excluded.status_planilha, ''), "
+            "                             processos.status_planilha), "
+            "  cnj_original    = COALESCE(NULLIF(excluded.cnj_original, ''), "
+            "                             processos.cnj_original)",
             (cnj, tarefa, situacao, id_legalone, detalhe, origem, tipo_cobranca,
-             status_planilha, datetime.now().isoformat(timespec="seconds")),
+             status_planilha, cnj_original,
+             datetime.now().isoformat(timespec="seconds")),
         )
         self.con.commit()
-
-    def situacao_de(self, cnj: str, tarefa: str) -> str | None:
-        linha = self.con.execute(
-            "SELECT situacao FROM processos WHERE cnj = ? AND tarefa = ?",
-            (cnj, tarefa),
-        ).fetchone()
-        return linha[0] if linha else None
 
     def concluidos(self, tarefa: str) -> set[str]:
         marcas = ",".join("?" * len(CONCLUIDAS))
@@ -166,16 +191,23 @@ class Ledger:
         Usado quando o disjuntor dispara: os ultimos "nao encontrado" antes de
         uma queda de sessao sao falsos, e deixa-los gravados faria a retomada
         pular justamente os processos que nunca foram avaliados de verdade.
+
+        So apaga o que ainda esta pendente. Um 'ok' ou 'ja_existia' e trabalho
+        confirmado no Legal One: apagar por engano faria a retomada cadastrar a
+        mesma tarefa de novo. Devolve quantos registros sairam de fato.
         """
         cnjs = list(cnjs)
         if not cnjs:
             return 0
-        self.con.executemany(
-            "DELETE FROM processos WHERE cnj = ? AND tarefa = ?",
-            [(c, tarefa) for c in cnjs],
+        marcas = ",".join("?" * len(CONCLUIDAS))
+        cursor = self.con.executemany(
+            f"DELETE FROM processos "
+            f"WHERE cnj = ? AND tarefa = ? AND situacao NOT IN ({marcas})",
+            [(c, tarefa, *CONCLUIDAS) for c in cnjs],
         )
+        apagados = cursor.rowcount
         self.con.commit()
-        return len(cnjs)
+        return apagados
 
     def cadastrados_em(self, dia: str) -> list[tuple]:
         """Cadastros feitos por nos num dia (dia no formato AAAA-MM-DD)."""
@@ -225,17 +257,19 @@ class Ledger:
     def exportar_nao_encontrados(self, caminho: str | Path) -> int:
         """CSV so com o que precisa de conferencia manual na planilha."""
         marcas = ",".join("?" * len(PENDENTES_ATENCAO))
+        # O numero como estava na planilha e o que serve para procurar a linha
+        # de origem; ledger antigo nao guardava, e ai cai no normalizado.
         linhas = self.con.execute(
-            f"SELECT cnj, tarefa, situacao, detalhe, tipo_cobranca, "
-            f"       status_planilha, origem "
+            f"SELECT COALESCE(NULLIF(cnj_original, ''), cnj), cnj, tarefa, "
+            f"       situacao, detalhe, tipo_cobranca, status_planilha, origem "
             f"FROM processos WHERE situacao IN ({marcas}) "
             f"ORDER BY tarefa, origem, cnj",
             PENDENTES_ATENCAO,
         ).fetchall()
         escrever_nao_encontrados(caminho, [
-            {"cnj": c, "tarefa": tf, "situacao": s, "motivo": d,
-             "tipo_cobranca": t, "status_planilha": st, "origem": o}
-            for c, tf, s, d, t, st, o in linhas
+            {"cnj": orig, "cnj_busca": c, "tarefa": tf, "situacao": s,
+             "motivo": d, "tipo_cobranca": t, "status_planilha": st, "origem": o}
+            for orig, c, tf, s, d, t, st, o in linhas
         ])
         return len(linhas)
 

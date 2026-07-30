@@ -1,7 +1,8 @@
-"""Cadastro em lote da tarefa FATURAMENTO FINAL no Legal One.
+"""Cadastro em lote de tarefas no Legal One.
 
 Le a planilha de cobrancas, encontra cada processo no Legal One e cadastra a
-tarefa. Por padrao roda em simulacao — precisa de --executar para gravar.
+tarefa do perfil escolhido em --tarefa (FATURAMENTO FINAL ou DEFESA FATURADA).
+Por padrao roda em simulacao — precisa de --executar para gravar.
 """
 import argparse
 import datetime
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def argumentos():
     p = argparse.ArgumentParser(
-        description="Cadastra a tarefa FATURAMENTO FINAL em lote no Legal One.",
+        description="Cadastra tarefas em lote no Legal One a partir de uma planilha.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""exemplos:
   # simulacao das 20 primeiras (nao grava nada)
@@ -28,6 +29,10 @@ def argumentos():
 
   # cota do dia: para depois de 500 tarefas cadastradas
   python main.py --planilha "C:/.../Processos.xlsx" --max-cadastros 500 --executar
+
+  # o dia seguinte, na outra planilha, com a outra tarefa
+  python main.py --planilha "C:/.../Defesas.xlsx" --tarefa defesa-faturada \\
+      --max-cadastros 500 --executar
 
   # rodada real, planilha inteira, retomavel
   python main.py --planilha "C:/.../Processos.xlsx" --executar
@@ -95,20 +100,20 @@ def main() -> int:
     logger.info("%s v%s", config.PROJECT_NAME, config.VERSION)
     logger.info("=" * 60)
 
-    registro = ledger_mod.Ledger(config.LEDGER_FILE)
-
     if args.relatorio:
-        registro.exportar_csv(config.RELATORIO_CSV)
-        registro.exportar_nao_encontrados(config.NAO_ENCONTRADOS_CSV)
-        dias = [args.dia] if args.dia else registro.dias_com_cadastro()
-        if not dias:
-            logger.info("Nenhum cadastro registrado ainda.")
-        for dia in dias:
-            _gerar_planilha_do_dia(registro, dia)
-        logger.info("Situacao atual: %s", dict(registro.resumo()))
-        registro.close()
+        with ledger_mod.Ledger(config.LEDGER_FILE) as registro:
+            registro.exportar_csv(config.RELATORIO_CSV)
+            registro.exportar_nao_encontrados(config.NAO_ENCONTRADOS_CSV)
+            dias = [args.dia] if args.dia else registro.dias_com_cadastro()
+            if not dias:
+                logger.info("Nenhum cadastro registrado ainda.")
+            for dia in dias:
+                _gerar_planilha_do_dia(registro, dia)
+            logger.info("Situacao atual: %s", dict(registro.resumo()))
         return 0
 
+    # As validacoes vem antes de abrir o ledger: nenhuma delas precisa dele, e
+    # assim uma saida por erro de uso nao deixa banco aberto para tras.
     if not args.planilha:
         logger.error("Falta --planilha (ou use --relatorio)")
         return 2
@@ -150,6 +155,8 @@ def main() -> int:
     except (FileNotFoundError, ValueError) as e:
         logger.error("%s", e)
         return 2
+
+    registro = ledger_mod.Ledger(config.LEDGER_FILE)
 
     # Uma simulacao nao deve deixar rastro no ledger, senao a rodada real
     # seguinte "pularia" processos que nunca foram cadastrados de fato.
@@ -213,12 +220,27 @@ def main() -> int:
 
     trilha_sem_achar: list[str] = []
     nao_encontrados: list[dict] = []
+    # Dias em que esta rodada cadastrou alguma coisa. E um conjunto porque uma
+    # rodada longa atravessa a meia-noite, e cada dia tem a sua planilha.
+    dias_cadastrados: set[str] = set()
     disjuntor = False
     cadastradas = 0
     cota_atingida = False
 
     try:
         for i, proc in enumerate(fila, 1):
+            busca = None
+            # Sempre que o registro for gravado, vai com a origem na planilha
+            # junto: e o que preenche as colunas do relatorio e da planilha do
+            # dia, inclusive quando o processo termina em erro.
+            da_planilha = {
+                "origem": proc.origem,
+                "tipo_cobranca": "; ".join(proc.tipos_cobranca),
+                "status_planilha": "; ".join(proc.status_planilha),
+                # Numero como estava escrito na planilha: e por ele que se acha
+                # a linha de origem quando o processo cai na conferencia manual.
+                "cnj_original": proc.cnj_original,
+            }
             try:
                 if not automador.aba_viva():
                     logger.warning("A aba de trabalho sumiu (fechada?) — recriando")
@@ -230,11 +252,9 @@ def main() -> int:
                     detalhe = busca.detalhe
                     if not proc.formato_ok:
                         detalhe = f"{detalhe} (numero fora do padrao CNJ)"
-                    situacao = (ledger_mod.AMBIGUO if "ambiguo" in busca.detalhe
+                    situacao = (ledger_mod.AMBIGUO if busca.ambiguo
                                 else ledger_mod.NAO_ENCONTRADO)
-                    anotar(proc.cnj, situacao, detalhe=detalhe, origem=proc.origem,
-                           tipo_cobranca="; ".join(proc.tipos_cobranca),
-                           status_planilha="; ".join(proc.status_planilha))
+                    anotar(proc.cnj, situacao, detalhe=detalhe, **da_planilha)
                     nao_encontrados.append({
                         "cnj": proc.cnj_original,
                         # O numero de fato pesquisado; difere do original quando
@@ -243,8 +263,8 @@ def main() -> int:
                         "tarefa": perfil.descricao,
                         "situacao": situacao,
                         "motivo": detalhe,
-                        "tipo_cobranca": "; ".join(proc.tipos_cobranca),
-                        "status_planilha": "; ".join(proc.status_planilha),
+                        "tipo_cobranca": da_planilha["tipo_cobranca"],
+                        "status_planilha": da_planilha["status_planilha"],
                         "origem": proc.origem,
                     })
                     contagem["nao_encontrado"] += 1
@@ -268,7 +288,7 @@ def main() -> int:
                     busca.id_legalone, perfil.descricao
                 ):
                     anotar(proc.cnj, ledger_mod.JA_EXISTIA, busca.id_legalone,
-                           "processo ja tinha a tarefa", proc.origem)
+                           "processo ja tinha a tarefa", **da_planilha)
                     contagem["ja_existia"] += 1
                     logger.info("[%d/%d] %s — ja tinha a tarefa, pulando",
                                 i, len(fila), proc.cnj)
@@ -277,11 +297,11 @@ def main() -> int:
                 resultado = automador.cadastrar_tarefa(busca.id_legalone, args.executar)
 
                 anotar(proc.cnj, ledger_mod.OK, busca.id_legalone,
-                       resultado, proc.origem,
-                       tipo_cobranca="; ".join(proc.tipos_cobranca),
-                       status_planilha="; ".join(proc.status_planilha))
+                       resultado, **da_planilha)
                 contagem["ok"] += 1
                 cadastradas += 1
+                if args.executar:
+                    dias_cadastrados.add(datetime.date.today().isoformat())
                 logger.info("[%d/%d] %s -> id %s (%s) %s",
                             i, len(fila), proc.cnj, busca.id_legalone,
                             busca.status, resultado)
@@ -294,8 +314,11 @@ def main() -> int:
                 raise
             except Exception as e:
                 anotar(proc.cnj, ledger_mod.ERRO,
-                       detalhe=f"{type(e).__name__}: {e}"[:400],
-                       origem=proc.origem)
+                       # Se a busca chegou a achar o processo, guarda o id: e
+                       # por ele que se abre o caso a mao depois.
+                       busca.id_legalone if busca and busca.encontrado else "",
+                       f"{type(e).__name__}: {e}"[:400],
+                       **da_planilha)
                 contagem["erro"] += 1
                 logger.error("[%d/%d] %s — ERRO: %s: %s",
                              i, len(fila), proc.cnj, type(e).__name__, e)
@@ -347,12 +370,23 @@ def main() -> int:
         logger.error("SESSAO EXPIRADA: %s", e)
     finally:
         registro.exportar_csv(config.RELATORIO_CSV)
-        ledger_mod.escrever_nao_encontrados(
-            config.NAO_ENCONTRADOS_CSV, nao_encontrados
-        )
-        hoje = datetime.date.today().isoformat()
+
         if args.executar:
-            _gerar_planilha_do_dia(registro, hoje)
+            # Sai do ledger, entao acumula o que as rodadas anteriores tambem
+            # levantaram. Uma simulacao so enxerga a propria fila e por isso
+            # escreve noutro arquivo, sem encostar na lista de verdade.
+            conferencia = config.NAO_ENCONTRADOS_CSV
+            pendentes = registro.exportar_nao_encontrados(conferencia)
+        else:
+            conferencia = config.NAO_ENCONTRADOS_SIMULACAO_CSV
+            pendentes = ledger_mod.escrever_nao_encontrados(
+                conferencia, nao_encontrados
+            )
+
+        # Uma planilha por dia tocado: rodada que atravessa a meia-noite gera as
+        # duas, cada uma so com o que foi cadastrado naquele dia.
+        for dia in sorted(dias_cadastrados):
+            _gerar_planilha_do_dia(registro, dia)
 
         logger.info("Resumo desta rodada: %s", contagem)
         logger.info("Acumulado em %-18s %s", perfil.descricao + ":",
@@ -360,11 +394,13 @@ def main() -> int:
         logger.info("Acumulado geral:     %s", dict(registro.resumo()))
         logger.info("Relatorio:            %s", config.RELATORIO_CSV)
         logger.info("Para conferir a mao:  %s (%d processo[s])",
-                    config.NAO_ENCONTRADOS_CSV, len(nao_encontrados))
-        if args.executar:
-            logger.info("Planilha do dia:      %s", config.planilha_do_dia(hoje))
-        else:
+                    conferencia, pendentes)
+        for dia in sorted(dias_cadastrados):
+            logger.info("Planilha do dia:      %s", config.planilha_do_dia(dia))
+        if not args.executar:
             logger.info("Foi SIMULACAO — nada foi gravado no Legal One.")
+        elif not dias_cadastrados:
+            logger.info("Nenhuma tarefa nova cadastrada — sem planilha do dia.")
         registro.close()
 
     return 0

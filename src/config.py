@@ -22,10 +22,12 @@ DATA_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
 
 LOG_FILE = str(LOGS_DIR / "faturamento.log")
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
+    # LOG_LEVEL invalido cai em INFO: um nome errado na variavel de ambiente
+    # nao deve impedir a rodada de comecar.
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler(LOG_FILE, encoding="utf-8"),
@@ -122,7 +124,13 @@ DEBUG_ADDRESS = f"localhost:{DEBUG_PORT}"
 
 LEDGER_FILE = str(DATA_DIR / "ledger.sqlite3")
 RELATORIO_CSV = str(DATA_DIR / "relatorio.csv")
+
+# A lista de conferencia da rodada real e acumulada (vem do ledger, com tudo o
+# que ja passou). A da simulacao e volatil e so cobre o que aquela passada olhou
+# — por isso vai para outro arquivo: rodar uma simulacao de 20 processos nao
+# pode apagar a lista de milhares levantada nas rodadas de verdade.
 NAO_ENCONTRADOS_CSV = str(DATA_DIR / "nao_encontrados.csv")
+NAO_ENCONTRADOS_SIMULACAO_CSV = str(DATA_DIR / "nao_encontrados_simulacao.csv")
 
 
 def planilha_do_dia(dia: str) -> str:
@@ -130,10 +138,5 @@ def planilha_do_dia(dia: str) -> str:
     return str(DATA_DIR / f"cadastrados_{dia}.xlsx")
 
 
-VERSION_NOTA = (
-    "O ledger e indexado por (processo, tarefa): o mesmo processo pode receber "
-    "FATURAMENTO FINAL e DEFESA FATURADA sem que uma rodada pule a outra."
-)
-
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 PROJECT_NAME = "Cadastro de tarefas em lote - Legal One"

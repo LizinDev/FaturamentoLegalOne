@@ -24,9 +24,10 @@ class Processo:
     cnj: str                 # numero normalizado, usado na busca
     cnj_original: str        # como estava na planilha
     formato_ok: bool
-    abas: list[str] = dataclasses.field(default_factory=list)
     tipos_cobranca: list[str] = dataclasses.field(default_factory=list)
     status_planilha: list[str] = dataclasses.field(default_factory=list)
+    # Onde o processo aparece, no formato "aba!Lnn" — um processo repetido em
+    # varias linhas/abas vira uma entrada so, com todas as origens.
     linhas: list[str] = dataclasses.field(default_factory=list)
 
     @property
@@ -131,8 +132,6 @@ def ler(
                     proc = Processo(cnj=cnj, cnj_original=bruto, formato_ok=ok)
                     por_cnj[cnj] = proc
 
-                if nome not in proc.abas:
-                    proc.abas.append(nome)
                 if tipo and tipo not in proc.tipos_cobranca:
                     proc.tipos_cobranca.append(tipo)
                 if status and status not in proc.status_planilha:

@@ -34,7 +34,9 @@ class ResultadoBusca:
     id_legalone: str = ""
     status: str = ""
     detalhe: str = ""
-    candidatos: int = 0
+    # Achou mais de uma pasta do tipo Processo com o mesmo numero: e caso de
+    # conferencia manual, e nao de "processo inexistente".
+    ambiguo: bool = False
 
 
 def conectar() -> webdriver.Chrome:
@@ -55,7 +57,7 @@ def conectar() -> webdriver.Chrome:
 
 
 class AutomadorLegalOne:
-    """Busca processos e cadastra a tarefa de faturamento."""
+    """Busca processos e cadastra a tarefa do perfil recebido."""
 
     def __init__(self, driver: webdriver.Chrome, data_tarefa: str,
                  perfil: "config.PerfilTarefa"):
@@ -116,16 +118,26 @@ class AutomadorLegalOne:
         except TimeoutException:
             pass
 
+        # Varre todas as tabelas da pagina, e nao so a primeira: a grade de
+        # resultados nem sempre e a primeira tabela do DOM (filtros e paineis
+        # laterais tambem usam <table>), e olhar so uma delas devolveria "nenhum
+        # resultado" para um processo que existe. Linha sem link de processo e
+        # descartada, entao varrer a mais nao inventa candidato.
         linhas = self.driver.execute_script("""
-        const tabela = document.querySelector('table');
-        if (!tabela) return [];
-        return [...tabela.querySelectorAll('tbody tr')].map(tr => {
-          const cels = [...tr.querySelectorAll('td')].map(td => td.innerText.trim());
-          const link = [...tr.querySelectorAll('a')]
-            .map(a => a.getAttribute('href') || '')
-            .find(h => h.includes('/processos/processos/details/')) || '';
-          return {cels: cels, href: link};
-        }).filter(x => x.href);
+        const linhas = [];
+        for (const tabela of document.querySelectorAll('table')) {
+          for (const tr of tabela.querySelectorAll('tbody tr')) {
+            const link = [...tr.querySelectorAll('a')]
+              .map(a => a.getAttribute('href') || '')
+              .find(h => h.includes('/processos/processos/details/'));
+            if (!link) continue;
+            linhas.push({
+              cels: [...tr.querySelectorAll('td')].map(td => td.innerText.trim()),
+              href: link,
+            });
+          }
+        }
+        return linhas;
         """)
 
         candidatos = []
@@ -155,7 +167,6 @@ class AutomadorLegalOne:
                 False,
                 detalhe=(f"{len(candidatos)} resultado(s), nenhum com o numero exato"
                          if candidatos else "nenhum resultado"),
-                candidatos=len(candidatos),
             )
 
         # Recurso e incidente repetem o CNJ do processo principal; cadastrar
@@ -166,15 +177,15 @@ class AutomadorLegalOne:
             return ResultadoBusca(
                 False,
                 detalhe=f"nenhuma pasta do tipo {config.TIPO_ACEITO} (achei: {tipos})",
-                candidatos=len(exatos),
             )
 
         ids = {c["id"] for c in processos}
         if len(ids) > 1:
             return ResultadoBusca(
                 False,
-                detalhe=f"ambiguo: ids {sorted(ids)}",
-                candidatos=len(ids),
+                detalhe=f"ambiguo: {len(ids)} pastas do tipo {config.TIPO_ACEITO}, "
+                        f"ids {sorted(ids)}",
+                ambiguo=True,
             )
 
         escolhido = processos[0]
@@ -182,7 +193,6 @@ class AutomadorLegalOne:
             True,
             id_legalone=escolhido["id"],
             status=escolhido["status"],
-            candidatos=len(ids),
         )
 
     def tarefa_ja_existe(self, id_legalone: str, descricao: str) -> bool:
@@ -333,6 +343,15 @@ class AutomadorLegalOne:
         )
         campo_desc.clear()
         campo_desc.send_keys(self.perfil.descricao)
+
+        # A descricao e o que identifica a tarefa depois — inclusive para a
+        # checagem de duplicata. Se um caractere se perder, a tarefa nasce com o
+        # texto errado e a rodada seguinte nao reconhece que ela ja existe.
+        escrito = campo_desc.get_attribute("value")
+        if escrito != self.perfil.descricao:
+            raise RuntimeError(
+                f"campo Descricao ficou {escrito!r}, esperava {self.perfil.descricao!r}"
+            )
 
         # Tipo e datas ja vem certos do formulario; confirmamos em vez de
         # reescrever, para nao desfazer o vinculo de TipoId.
