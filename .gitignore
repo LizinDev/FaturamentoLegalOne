@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Ledger, relatorios e logs contem numeros de processo e nomes de clientes
+data/
+logs/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.csv
+*.xlsx
