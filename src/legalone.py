@@ -1,4 +1,5 @@
 """Automacao do Legal One: busca de processo e cadastro da tarefa."""
+import contextlib
 import dataclasses
 import logging
 import os
@@ -39,10 +40,74 @@ class ResultadoBusca:
     ambiguo: bool = False
 
 
+def _coluna(cels: list[str], i: int) -> str:
+    return cels[i].strip() if i < len(cels) else ""
+
+
+def interpretar_busca(linhas: list[dict], cnj: str) -> ResultadoBusca:
+    """Transforma as linhas da grade de resultados no processo escolhido.
+
+    Separada do Selenium para poder ser testada com as linhas na mao — e aqui
+    que moram as regras que decidem em qual pasta a tarefa vai ser cadastrada.
+    """
+    candidatos = []
+    for linha in linhas:
+        cels = linha.get("cels") or []
+        caminho = urllib.parse.urlparse(linha.get("href") or "").path
+        ident = caminho.rstrip("/").split("/")[-1]
+        if not ident.isdigit():
+            continue
+
+        # A celula do processo traz o CNJ na 1a linha e a pasta na 2a.
+        numero = _coluna(cels, config.COL_PROCESSO).split("\n")[0].strip()
+        candidatos.append({
+            "id": ident,
+            "numero": numero,
+            "tipo": _coluna(cels, config.COL_TIPO),
+            "status": _coluna(cels, config.COL_STATUS),
+        })
+
+    # Descarta linhas cujo numero nao e exatamente o buscado (a busca do
+    # Legal One tambem casa pasta, envolvido e numeros parciais).
+    exatos = [c for c in candidatos if c["numero"] == cnj]
+    if not exatos:
+        return ResultadoBusca(
+            False,
+            detalhe=(f"{len(candidatos)} resultado(s), nenhum com o numero exato"
+                     if candidatos else "nenhum resultado"),
+        )
+
+    # Recurso e incidente repetem o CNJ do processo principal; cadastrar
+    # neles criaria tarefa duplicada para a mesma cobranca.
+    processos = [c for c in exatos if c["tipo"] == config.TIPO_ACEITO]
+    if not processos:
+        tipos = ", ".join(sorted({c["tipo"] for c in exatos}))
+        return ResultadoBusca(
+            False,
+            detalhe=f"nenhuma pasta do tipo {config.TIPO_ACEITO} (achei: {tipos})",
+        )
+
+    ids = {c["id"] for c in processos}
+    if len(ids) > 1:
+        return ResultadoBusca(
+            False,
+            detalhe=f"ambiguo: {len(ids)} pastas do tipo {config.TIPO_ACEITO}, "
+                    f"ids {sorted(ids)}",
+            ambiguo=True,
+        )
+
+    escolhido = processos[0]
+    return ResultadoBusca(
+        True,
+        id_legalone=escolhido["id"],
+        status=escolhido["status"],
+    )
+
+
 def conectar() -> webdriver.Chrome:
     """Conecta ao Chrome ja aberto em modo debug (nunca abre outra instancia)."""
-    # Em maquinas com chromedriver antigo instalado via chocolatey/apt, o binario
-    # do PATH ganha do Selenium Manager e quebra com Chrome novo. Tirando esses
+    # Em maquinas com chromedriver antigo instalado via chocolatey, o binario do
+    # PATH ganha do Selenium Manager e quebra com Chrome novo. Tirando esses
     # diretorios do PATH, o Selenium Manager baixa a versao compativel.
     os.environ["PATH"] = os.pathsep.join(
         p for p in os.environ.get("PATH", "").split(os.pathsep)
@@ -65,6 +130,7 @@ class AutomadorLegalOne:
         self.wait = WebDriverWait(driver, config.TIMEOUT_PADRAO)
         self.data_tarefa = data_tarefa
         self.perfil = perfil
+        self._aba: str | None = None
 
     # --- infraestrutura ------------------------------------------------------
 
@@ -72,15 +138,27 @@ class AutomadorLegalOne:
 
     def usar_aba_propria(self) -> None:
         """Trabalha numa aba dedicada, sem mexer nas abas abertas pelo usuario."""
-        for handle in self.driver.window_handles:
+        handles = self.driver.window_handles
+
+        # O handle guardado vem primeiro porque o Chrome limpa window.name em
+        # navegacao entre sites: confiar so na marca faria o programa abrir uma
+        # aba nova a cada checagem e encher o Chrome do usuario de abas.
+        if self._aba in handles:
+            self.driver.switch_to.window(self._aba)
+            return
+
+        for handle in handles:
             try:
                 self.driver.switch_to.window(handle)
                 if self.driver.execute_script("return window.name;") == self.MARCA_ABA:
+                    self._aba = handle
                     return
             except Exception:
                 continue
+
         self.driver.switch_to.new_window("tab")
-        self.driver.execute_script(f"window.name = {self.MARCA_ABA!r};")
+        self.driver.execute_script("window.name = arguments[0];", self.MARCA_ABA)
+        self._aba = self.driver.current_window_handle
         logger.info("Aba dedicada criada")
 
     def aba_viva(self) -> bool:
@@ -105,28 +183,37 @@ class AutomadorLegalOne:
         self.driver.get(url)
         self._checar_sessao()
 
+    def _esperar_carregar(self) -> None:
+        """Espera a pagina terminar de carregar, sem tratar o timeout como falha.
+
+        Uma requisicao pendente em segundo plano nao impede de ler a grade; se a
+        pagina realmente nao veio, quem trata e a leitura seguinte.
+        """
+        with contextlib.suppress(TimeoutException):
+            self.wait.until(lambda d: d.execute_script(
+                "return document.readyState === 'complete';"
+            ))
+
     # --- busca ---------------------------------------------------------------
 
     def buscar_processo(self, cnj: str) -> ResultadoBusca:
         """Acha o id interno do processo a partir do numero CNJ."""
         self._ir_para(config.URL_BUSCA.format(cnj=urllib.parse.quote(cnj)))
-
-        try:
-            self.wait.until(lambda d: d.execute_script(
-                "return document.readyState === 'complete';"
-            ))
-        except TimeoutException:
-            pass
+        self._esperar_carregar()
 
         # Varre todas as tabelas da pagina, e nao so a primeira: a grade de
         # resultados nem sempre e a primeira tabela do DOM (filtros e paineis
         # laterais tambem usam <table>), e olhar so uma delas devolveria "nenhum
         # resultado" para um processo que existe. Linha sem link de processo e
         # descartada, entao varrer a mais nao inventa candidato.
+        # O Set evita contar duas vezes a mesma linha quando ha tabela aninhada.
         linhas = self.driver.execute_script("""
+        const vistas = new Set();
         const linhas = [];
         for (const tabela of document.querySelectorAll('table')) {
           for (const tr of tabela.querySelectorAll('tbody tr')) {
+            if (vistas.has(tr)) continue;
+            vistas.add(tr);
             const link = [...tr.querySelectorAll('a')]
               .map(a => a.getAttribute('href') || '')
               .find(h => h.includes('/processos/processos/details/'));
@@ -140,60 +227,7 @@ class AutomadorLegalOne:
         return linhas;
         """)
 
-        candidatos = []
-        for linha in linhas:
-            cels = linha["cels"]
-            m = urllib.parse.urlparse(linha["href"]).path.rstrip("/").split("/")[-1]
-            if not m.isdigit():
-                continue
-
-            def coluna(i: int) -> str:
-                return cels[i].strip() if i < len(cels) else ""
-
-            # A celula do processo traz o CNJ na 1a linha e a pasta na 2a.
-            numero = coluna(config.COL_PROCESSO).split("\n")[0].strip()
-            candidatos.append({
-                "id": m,
-                "numero": numero,
-                "tipo": coluna(config.COL_TIPO),
-                "status": coluna(config.COL_STATUS),
-            })
-
-        # Descarta linhas cujo numero nao e exatamente o buscado (a busca do
-        # Legal One tambem casa pasta, envolvido e numeros parciais).
-        exatos = [c for c in candidatos if c["numero"] == cnj]
-        if not exatos:
-            return ResultadoBusca(
-                False,
-                detalhe=(f"{len(candidatos)} resultado(s), nenhum com o numero exato"
-                         if candidatos else "nenhum resultado"),
-            )
-
-        # Recurso e incidente repetem o CNJ do processo principal; cadastrar
-        # neles criaria tarefa duplicada para a mesma cobranca.
-        processos = [c for c in exatos if c["tipo"] == config.TIPO_ACEITO]
-        if not processos:
-            tipos = ", ".join(sorted({c["tipo"] for c in exatos}))
-            return ResultadoBusca(
-                False,
-                detalhe=f"nenhuma pasta do tipo {config.TIPO_ACEITO} (achei: {tipos})",
-            )
-
-        ids = {c["id"] for c in processos}
-        if len(ids) > 1:
-            return ResultadoBusca(
-                False,
-                detalhe=f"ambiguo: {len(ids)} pastas do tipo {config.TIPO_ACEITO}, "
-                        f"ids {sorted(ids)}",
-                ambiguo=True,
-            )
-
-        escolhido = processos[0]
-        return ResultadoBusca(
-            True,
-            id_legalone=escolhido["id"],
-            status=escolhido["status"],
-        )
+        return interpretar_busca(linhas, cnj)
 
     def tarefa_ja_existe(self, id_legalone: str, descricao: str) -> bool:
         """Diz se o processo ja tem uma tarefa com essa descricao.
@@ -208,12 +242,7 @@ class AutomadorLegalOne:
             f"{config.BASE_URL}/processos/Processos/DetailsCompromissosTarefas/"
             f"{id_legalone}?Search={urllib.parse.quote(descricao)}"
         )
-        try:
-            self.wait.until(lambda d: d.execute_script(
-                "return document.readyState === 'complete';"
-            ))
-        except TimeoutException:
-            pass
+        self._esperar_carregar()
 
         # Le as linhas da grade, e nao o texto da pagina: a descricao tambem
         # aparece dentro do <script> que monta a confirmacao de exclusao, e

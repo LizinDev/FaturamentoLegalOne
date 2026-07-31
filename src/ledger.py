@@ -13,6 +13,7 @@ import csv
 import logging
 import sqlite3
 from collections import Counter
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
@@ -30,7 +31,7 @@ CONCLUIDAS = {OK, JA_EXISTIA}
 # Situacoes que pedem conferencia manual na planilha.
 PENDENTES_ATENCAO = (NAO_ENCONTRADO, AMBIGUO)
 
-ESQUEMA = """
+ESQUEMA_TABELA = """
 CREATE TABLE IF NOT EXISTS processos (
     cnj             TEXT NOT NULL,
     tarefa          TEXT NOT NULL,
@@ -43,10 +44,13 @@ CREATE TABLE IF NOT EXISTS processos (
     cnj_original    TEXT,
     quando          TEXT NOT NULL,
     PRIMARY KEY (cnj, tarefa)
-);
-CREATE INDEX IF NOT EXISTS idx_situacao ON processos(situacao);
-CREATE INDEX IF NOT EXISTS idx_tarefa ON processos(tarefa);
+)
 """
+
+ESQUEMA_INDICES = (
+    "CREATE INDEX IF NOT EXISTS idx_situacao ON processos(situacao)",
+    "CREATE INDEX IF NOT EXISTS idx_tarefa ON processos(tarefa)",
+)
 
 # Colunas acrescentadas depois que ja havia ledger em producao. Sao opcionais,
 # entao entram com ALTER TABLE em vez de recriar a tabela.
@@ -65,7 +69,12 @@ class Ledger:
         # WAL aguenta melhor uma interrupcao brusca no meio da rodada.
         self.con.execute("PRAGMA journal_mode=WAL")
         self._migrar()
-        self.con.executescript(ESQUEMA)
+        # Os indices vem depois da migracao de proposito: enquanto a tabela
+        # antiga existe, os indices dela ocupam esses mesmos nomes e o
+        # IF NOT EXISTS viraria um no-op silencioso.
+        self.con.execute(ESQUEMA_TABELA)
+        for indice in ESQUEMA_INDICES:
+            self.con.execute(indice)
         self.con.commit()
 
     def _migrar(self) -> None:
@@ -89,18 +98,26 @@ class Ledger:
         tipo = "tipo_cobranca" if "tipo_cobranca" in colunas else "''"
         status = "status_planilha" if "status_planilha" in colunas else "''"
 
-        self.con.execute("ALTER TABLE processos RENAME TO processos_antigo")
-        self.con.executescript(ESQUEMA)
-        self.con.execute(
-            f"INSERT INTO processos "
-            f"  (cnj, tarefa, situacao, id_legalone, detalhe, origem, "
-            f"   tipo_cobranca, status_planilha, quando) "
-            f"SELECT cnj, ?, situacao, id_legalone, detalhe, origem, "
-            f"       {tipo}, {status}, quando FROM processos_antigo",
-            (TAREFA_HISTORICA,),
-        )
-        movidos = self.con.execute("SELECT COUNT(*) FROM processos").fetchone()[0]
-        self.con.execute("DROP TABLE processos_antigo")
+        # Tudo numa transacao so: uma queda no meio da copia deixaria o
+        # historico de milhares de cadastros pela metade. O SQLite versiona
+        # tambem o DDL, entao o ALTER/CREATE/DROP entram junto.
+        self.con.execute("BEGIN IMMEDIATE")
+        try:
+            self.con.execute("ALTER TABLE processos RENAME TO processos_antigo")
+            self.con.execute(ESQUEMA_TABELA)
+            self.con.execute(
+                f"INSERT INTO processos "
+                f"  (cnj, tarefa, situacao, id_legalone, detalhe, origem, "
+                f"   tipo_cobranca, status_planilha, quando) "
+                f"SELECT cnj, ?, situacao, id_legalone, detalhe, origem, "
+                f"       {tipo}, {status}, quando FROM processos_antigo",
+                (TAREFA_HISTORICA,),
+            )
+            movidos = self.con.execute("SELECT COUNT(*) FROM processos").fetchone()[0]
+            self.con.execute("DROP TABLE processos_antigo")
+        except Exception:
+            self.con.rollback()
+            raise
         self.con.commit()
         logger.info("Ledger migrado: %d registro(s) atribuidos a %r",
                     movidos, TAREFA_HISTORICA)
@@ -185,7 +202,7 @@ class Ledger:
             )
         }
 
-    def esquecer(self, cnjs, tarefa: str) -> int:
+    def esquecer(self, cnjs: Iterable[str], tarefa: str) -> int:
         """Apaga registros para que o processo seja tentado de novo do zero.
 
         Usado quando o disjuntor dispara: os ultimos "nao encontrado" antes de
@@ -283,13 +300,14 @@ class Ledger:
         self.close()
 
 
-def escrever_nao_encontrados(caminho: str | Path, itens: list[dict]) -> int:
+def escrever_nao_encontrados(caminho: str | Path, itens: Iterable[dict]) -> int:
     """Grava a lista de conferencia manual.
 
     Fica fora da classe porque uma simulacao nao toca no ledger e mesmo assim
     precisa produzir esta lista — e justamente com --so-buscar que se levanta
     quais processos nao existem no Legal One.
     """
+    itens = list(itens)
     with open(caminho, "w", newline="", encoding="utf-8-sig") as f:
         escritor = csv.writer(f, delimiter=";")
         escritor.writerow(

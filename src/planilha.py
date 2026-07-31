@@ -62,6 +62,14 @@ def _indices_cabecalho(linha) -> dict[str, int]:
     return indices
 
 
+def _celula(linha, indices: dict[str, int], coluna: str) -> str:
+    """Valor de uma coluna nomeada, ja normalizado ("" se ausente ou vazia)."""
+    i = indices.get(coluna)
+    if i is None or i >= len(linha) or linha[i] is None:
+        return ""
+    return " ".join(str(linha[i]).split())
+
+
 def ler(
     caminho: str | Path,
     abas: list[str] | None = None,
@@ -106,18 +114,12 @@ def ler(
                         break
                     continue
 
-                def celula(coluna: str) -> str:
-                    i = indices.get(coluna)
-                    if i is None or i >= len(linha) or linha[i] is None:
-                        return ""
-                    return " ".join(str(linha[i]).split())
-
-                bruto = celula(config.COLUNA_PROCESSO)
+                bruto = _celula(linha, indices, config.COLUNA_PROCESSO)
                 if not bruto:
                     continue
 
-                tipo = celula(config.COLUNA_TIPO_COBRANCA)
-                status = celula(config.COLUNA_STATUS_LEGALONE)
+                tipo = _celula(linha, indices, config.COLUNA_TIPO_COBRANCA)
+                status = _celula(linha, indices, config.COLUNA_STATUS_LEGALONE)
 
                 if tipo_contem and tipo_contem.upper() not in tipo.upper():
                     continue

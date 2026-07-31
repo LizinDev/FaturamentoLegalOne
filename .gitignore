@@ -11,3 +11,12 @@ logs/
 *.sqlite3-shm
 *.csv
 *.xlsx
+*.bak
+
+# Ferramentas
+.pytest_cache/
+.ruff_cache/
+
+# Editores
+.idea/
+.vscode/

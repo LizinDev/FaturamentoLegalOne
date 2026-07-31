@@ -35,6 +35,8 @@ da outra criaria centenas de tarefas indevidas.
 pip install -r requirements.txt
 ```
 
+Para mexer no código, veja [Desenvolvimento](#desenvolvimento).
+
 ## Como usar
 
 ### 1. Abrir o Chrome em modo debug
@@ -213,7 +215,23 @@ trabalho confirmado no Legal One e nunca são apagados.
 **`Ctrl+C`** — encerra limpo, exporta os relatórios e mantém o progresso.
 
 Em qualquer saída — inclusive erro fatal ou `Ctrl+C` — os relatórios são
-exportados antes de terminar.
+exportados antes de terminar. Cada arquivo é gravado por conta própria: se o
+`relatorio.csv` estiver aberto no Excel (o Windows recusa a escrita), o erro
+aparece no log e os outros arquivos saem do mesmo jeito.
+
+### Código de saída
+
+Para quem for agendar a rodada num script:
+
+| Código | Significado |
+| --- | --- |
+| `0` | Rodada completa, ou nada a fazer |
+| `1` | Rodada abortada: sessão expirada, disjuntor ou Chrome fora do ar |
+| `2` | Erro de uso: argumento ou planilha inválida |
+| `130` | Interrompida com `Ctrl+C` |
+
+Atenção: `1` significa que **a fila não terminou**, e não que os cadastros
+feitos até ali se perderam — esses estão no ledger. É só rodar de novo.
 
 ### O que vigiar durante a rodada
 
@@ -302,13 +320,55 @@ em vez de sumirem em silêncio.
 
 ```
 src/
-├── main.py       # CLI, laço principal, progresso e ETA
+├── main.py       # CLI, laço principal (classe Rodada), progresso e ETA
 ├── config.py     # URLs, seletores, valores da tarefa e timeouts
 ├── planilha.py   # leitura do .xlsx -> lista de processos únicos
 ├── legalone.py   # Selenium: busca o processo e cadastra a tarefa
 ├── ledger.py     # checkpoint em SQLite + exportação dos CSVs
 └── relatorio.py  # planilha Excel do dia (a que vai para o supervisor)
+
+tests/            # pytest — nenhum teste abre o Chrome
+.github/          # CI, análise de dependências e Dependabot
 ```
+
+## Desenvolvimento
+
+```bash
+pip install -r requirements-dev.txt
+pytest          # a suíte inteira roda em segundos, sem navegador
+ruff check .    # lint
+```
+
+Nenhum teste toca no Legal One, no Chrome ou no ledger de produção: o Selenium
+é substituído por um automador falso e todo arquivo vai para um diretório
+temporário. O que está coberto é justamente o que dói quando quebra — a
+interpretação da grade de resultados (em qual pasta a tarefa vai), o ledger
+(inclusive as migrações de esquema antigo) e as regras que param ou não param a
+fila: disjuntor, cota do dia, sessão expirada, `Ctrl+C` e erro isolado.
+
+`ruff format` **não** é usado: o código é alinhado à mão e reformatar tudo
+esconderia o histórico atrás de uma mudança de estilo.
+
+### O que roda no GitHub Actions
+
+| Workflow | Quando | O que faz |
+| --- | --- | --- |
+| `ci.yml` | push e pull request | lint com ruff; `pytest` em Python 3.10/3.12/3.14 no Linux e 3.14 no Windows; fumaça da CLI (`--help`, `--relatorio`, código de saída) |
+| `seguranca.yml` | semanal e quando mexe nos requirements | `pip-audit` nas dependências |
+| `codeql.yml` | semanal | análise estática de segurança |
+| `dependabot.yml` | semanal/mensal | PR quando sai versão nova de dependência ou de action |
+
+O Windows está na matriz de propósito: é onde o programa roda de verdade, e
+caminho, encoding de console e arquivo travado pelo Excel se comportam
+diferente lá.
+
+A rodada completa não tem como ser testada na CI — ela depende de um Chrome
+logado no Legal One. Por isso a checagem de verdade continua sendo o
+`--so-buscar` e a simulação antes de uma rodada real.
+
+Como o repositório é **privado**, o `codeql.yml` exige GitHub Advanced
+Security e pode falhar no upload dos alertas; nesse caso é só apagar o arquivo.
+Ele já vem sem gatilho de push justamente para não atrapalhar o dia a dia.
 
 ## Notas técnicas
 
@@ -340,8 +400,12 @@ src/
   ledger esses registros suspeitos** e avisa — assim eles voltam para a fila na
   próxima rodada em vez de ficarem marcados como resolvidos.
 - **Chromedriver do PATH é ignorado.** Um chromedriver antigo instalado via
-  chocolatey/apt ganha do Selenium Manager e quebra com Chrome novo, então esses
-  diretórios são removidos do `PATH` no processo (`legalone.py`).
+  chocolatey ganha do Selenium Manager e quebra com Chrome novo, então esses
+  diretórios são removidos do `PATH` no processo (`legalone.py`). Num Linux com
+  chromedriver em `/usr/bin`, tire na mão — ali o `PATH` não dá para mexer.
+- **A aba de trabalho é lembrada pelo handle.** O Chrome limpa `window.name` em
+  navegação entre sites, então procurar só pela marca faria o programa abrir uma
+  aba nova a cada checagem e encher o navegador de abas.
 - **Sessão expirada aborta a rodada inteira.** Sem isso, um logout no meio do
   lote transformaria todos os processos restantes em `erro` e queimaria a fila
   em silêncio.
@@ -357,6 +421,12 @@ Para os ~12 mil processos únicos da planilha, o fluxo completo fica na casa das
 30 horas. Dá para rodar em pedaços — a retomada é automática.
 
 ## Versão
+
+**1.3.0** — suíte de testes e CI (ver [Desenvolvimento](#desenvolvimento)); o
+laço virou a classe `Rodada`, testável sem navegador; a rodada devolve código de
+saída; `--limite`/`--max-cadastros`/`--dia` são validados na linha de comando;
+uma exportação que falha não derruba mais as outras; migração do ledger numa
+transação só.
 
 1.2.0 — coluna vazia não sobrescreve mais coluna preenchida no ledger; lista de
 conferência acumulada (com a de simulação em arquivo próprio); planilha do dia

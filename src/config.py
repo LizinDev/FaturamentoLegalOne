@@ -1,4 +1,5 @@
 """Configuracoes centralizadas do cadastro em lote de tarefas no Legal One."""
+import contextlib
 import dataclasses
 import logging
 import os
@@ -9,17 +10,16 @@ from pathlib import Path
 # cumprido", nomes de cliente). Sem isto, um UnicodeEncodeError dentro do
 # logging derrubaria a rodada por causa de uma letra.
 for fluxo in (sys.stdout, sys.stderr):
-    try:
+    # Um fluxo redirecionado (pytest, pipe) pode nao ter reconfigure.
+    with contextlib.suppress(AttributeError, ValueError):
         fluxo.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, ValueError):
-        pass
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = BASE_DIR / "logs"
 
-DATA_DIR.mkdir(exist_ok=True)
-LOGS_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 LOG_FILE = str(LOGS_DIR / "faturamento.log")
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -138,5 +138,5 @@ def planilha_do_dia(dia: str) -> str:
     return str(DATA_DIR / f"cadastrados_{dia}.xlsx")
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 PROJECT_NAME = "Cadastro de tarefas em lote - Legal One"
