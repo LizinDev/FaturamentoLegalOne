@@ -1,0 +1,30 @@
+# Sem secao [project]: isto nao e um pacote instalavel, e um programa que se
+# roda com `python src/main.py`. O arquivo existe para concentrar a config das
+# ferramentas de qualidade.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]        # os modulos vivem soltos em src/, sem __init__.py
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 90
+target-version = "py310"    # menor versao suportada (ver README)
+src = ["src", "tests"]      # ensina o ruff quais imports sao do projeto
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # ordem dos imports
+    "UP",       # sintaxe moderna disponivel na versao alvo
+    "B",        # bugbear: armadilhas comuns
+    "C4",       # comprehensions
+    "SIM",      # simplificacoes
+    "RUF",      # regras do proprio ruff
+]
+ignore = [
+    # Levantar uma excecao dentro de `except` sem `from` e proposital nas
+    # validacoes de argumento: o erro do usuario nao precisa de stack trace.
+    "B904",
+]

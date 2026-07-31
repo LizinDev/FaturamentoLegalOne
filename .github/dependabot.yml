@@ -1,0 +1,27 @@
+version: 2
+
+# As versoes sao presas nos requirements de proposito (o chromedriver quebra
+# com Chrome novo, o ruff estreia regras). O Dependabot e quem avisa que saiu
+# versao nova, abrindo um PR que a CI testa antes de qualquer coisa entrar.
+
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Um PR so para as ferramentas de desenvolvimento; selenium e openpyxl
+      # merecem PR separado, porque sao eles que podem quebrar a rodada.
+      ferramentas:
+        patterns: ["pytest*", "ruff"]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"

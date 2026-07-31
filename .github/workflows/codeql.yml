@@ -1,0 +1,34 @@
+name: CodeQL
+
+# ATENCAO — em repositorio privado o code scanning exige GitHub Advanced
+# Security. Se este repo for privado e a organizacao nao tiver GHAS, este
+# workflow vai falhar no passo de upload: e so apagar o arquivo.
+#
+# Por isso ele nao roda em push nem em pull request: uma falha semanal por
+# licenca e um aviso, uma falha em todo push e um estorvo. Com GHAS ligado,
+# acrescente os gatilhos `push` e `pull_request` para ter analise nos PRs.
+
+on:
+  schedule:
+    - cron: "30 6 * * 1"   # toda segunda, logo depois do pip-audit
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analise:
+    name: analise estatica (python)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # necessario para publicar os alertas
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-and-quality
+
+      - uses: github/codeql-action/analyze@v3

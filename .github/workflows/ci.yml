@@ -1,0 +1,95 @@
+name: CI
+
+# A automacao em si depende de um Chrome logado no Legal One, entao a CI nao
+# testa a rodada de ponta a ponta — ela cobre o que da para verificar sem
+# navegador: leitura da planilha, ledger, relatorios, interpretacao da busca e
+# as regras do laco (disjuntor, cota, sessao expirada).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - run: pip install -r requirements-dev.txt
+
+      # So o lint. `ruff format` nao entra: o codigo e alinhado a mao (colunas
+      # de argumentos, comentarios longos) e reformatar tudo esconderia o
+      # historico de verdade atras de uma mudanca de estilo.
+      - run: ruff check --output-format=github .
+
+  testes:
+    name: testes (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.12", "3.14"]
+        include:
+          # O programa roda em Windows na maquina de quem usa: caminho, encoding
+          # do console e arquivo travado pelo Excel se comportam diferente la.
+          - os: windows-latest
+            python: "3.14"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - run: pip install -r requirements-dev.txt
+
+      - run: pytest
+
+  cli:
+    name: fumaca (CLI sem Chrome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - run: pip install -r requirements.txt
+
+      # Garante que o programa sobe e que os modos que nao precisam de navegador
+      # continuam funcionando num ambiente limpo.
+      - name: --help responde
+        run: python src/main.py --help
+
+      - name: --relatorio funciona com ledger vazio
+        run: python src/main.py --relatorio
+
+      - name: rodada sem planilha sai com codigo de uso
+        run: |
+          set +e
+          python src/main.py --executar
+          codigo=$?
+          set -e
+          test "$codigo" -eq 2 || { echo "esperava saida 2, veio $codigo"; exit 1; }
