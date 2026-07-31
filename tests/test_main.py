@@ -105,9 +105,41 @@ def test_trava_de_planilha_por_perfil():
 
 
 def test_perfil_sem_dica_nao_trava():
+    # Dica vazia desliga a trava. O perfil e montado aqui, e nao tirado de
+    # config.PERFIS, porque os perfis de verdade tem dica: se um dia deixarem
+    # de ter, e a trava que some, nao este teste que quebra.
+    perfil = config.PerfilTarefa("sem-dica", "TAREFA QUALQUER")
     args = main.argumentos(["--planilha", "qualquer.xlsx"])
 
-    main._conferir_planilha(args, config.PERFIS[config.PERFIL_PADRAO])
+    main._conferir_planilha(args, perfil)
+
+
+def test_perfis_de_verdade_travam_a_planilha_trocada():
+    """O par planilha/--tarefa e o erro caro: cadastra em lote a tarefa errada."""
+    defesa_na_mao_do_faturamento = main.argumentos(
+        ["--planilha", "C:/x/Defesa.xlsx", "--tarefa", "faturamento-final"]
+    )
+    faturamento_na_mao_da_defesa = main.argumentos(
+        ["--planilha", "C:/x/Faturamento.xlsx", "--tarefa", "defesa-faturada"]
+    )
+
+    with pytest.raises(main.ErroDeUso, match="Faturamento"):
+        main._conferir_planilha(defesa_na_mao_do_faturamento,
+                                config.PERFIS["faturamento-final"])
+    with pytest.raises(main.ErroDeUso, match="Defesa"):
+        main._conferir_planilha(faturamento_na_mao_da_defesa,
+                                config.PERFIS["defesa-faturada"])
+
+    # E cada uma com a sua passa.
+    main._conferir_planilha(
+        main.argumentos(["--planilha", "C:/x/Faturamento 2026.xlsx"]),
+        config.PERFIS["faturamento-final"],
+    )
+    main._conferir_planilha(
+        main.argumentos(["--planilha", "C:/x/Defesa 2026.xlsx",
+                         "--tarefa", "defesa-faturada"]),
+        config.PERFIS["defesa-faturada"],
+    )
 
 
 def test_planilha_inexistente_vira_erro_de_uso(dados_tmp):
@@ -279,7 +311,7 @@ def test_fila_vazia_termina_sem_abrir_o_chrome(dados_tmp, monkeypatch, tmp_path)
         raise AssertionError("nao era para tentar abrir o Chrome")
     monkeypatch.setattr(main.legalone, "conectar", nao_deveria_conectar)
 
-    assert main.main(["--planilha", str(tmp_path / "x.xlsx")]) == main.SAIDA_OK
+    assert main.main(["--planilha", str(tmp_path / "Faturamento.xlsx")]) == main.SAIDA_OK
 
 
 def test_chrome_fora_do_ar_devolve_codigo_de_rodada_abortada(
@@ -290,7 +322,9 @@ def test_chrome_fora_do_ar_devolve_codigo_de_rodada_abortada(
         raise ConnectionRefusedError("porta 9222 fechada")
     monkeypatch.setattr(main.legalone, "conectar", sem_chrome)
 
-    assert main.main(["--planilha", str(tmp_path / "x.xlsx")]) == main.SAIDA_ABORTADA
+    assert main.main(
+        ["--planilha", str(tmp_path / "Faturamento.xlsx")]
+    ) == main.SAIDA_ABORTADA
 
 
 # --- rodada inteira ----------------------------------------------------------
@@ -315,7 +349,9 @@ def _planilha_real(tmp_path):
     ws.append([ACHADO, "ENCERRAMENTO FINAL", "Ativo"])
     ws.append([INEXISTENTE, "ACORDO", "Ativo"])
     ws.append([COM_PONTO, "ACORDO", "Baixado"])
-    caminho = tmp_path / "Cobrancas.xlsx"
+    # O nome precisa combinar com a dica_arquivo do perfil padrao, senao a
+    # trava do par planilha/--tarefa barra a rodada antes de ela comecar.
+    caminho = tmp_path / "Faturamento.xlsx"
     wb.save(caminho)
     return caminho
 

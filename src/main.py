@@ -69,17 +69,17 @@ def argumentos(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""exemplos:
   # simulacao das 20 primeiras (nao grava nada)
-  python main.py --planilha "C:/Users/Kamila/Downloads/Processos.xlsx" --limite 20
+  python main.py --planilha "C:/Users/Kamila/Downloads/Faturamento.xlsx" --limite 20
 
   # cota do dia: para depois de 500 tarefas cadastradas
-  python main.py --planilha "C:/.../Processos.xlsx" --max-cadastros 500 --executar
+  python main.py --planilha "C:/.../Faturamento.xlsx" --max-cadastros 500 --executar
 
   # o dia seguinte, na outra planilha, com a outra tarefa
-  python main.py --planilha "C:/.../Defesas.xlsx" --tarefa defesa-faturada \\
+  python main.py --planilha "C:/.../Defesa.xlsx" --tarefa defesa-faturada \\
       --max-cadastros 500 --executar
 
   # rodada real, planilha inteira, retomavel
-  python main.py --planilha "C:/.../Processos.xlsx" --executar
+  python main.py --planilha "C:/.../Faturamento.xlsx" --executar
 
   # so a aba 2026, cobrancas de encerramento
   python main.py --planilha "..." --abas 2026 --tipo-contem "ENCERRAMENTO" --executar

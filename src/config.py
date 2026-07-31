@@ -84,8 +84,10 @@ class PerfilTarefa:
 
 PERFIS = {
     p.nome: p for p in [
-        PerfilTarefa("faturamento-final", "FATURAMENTO FINAL"),
-        PerfilTarefa("defesa-faturada", "DEFESA FATURADA"),
+        PerfilTarefa("faturamento-final", "FATURAMENTO FINAL",
+                     dica_arquivo="Faturamento"),
+        PerfilTarefa("defesa-faturada", "DEFESA FATURADA",
+                     dica_arquivo="Defesa"),
     ]
 }
 

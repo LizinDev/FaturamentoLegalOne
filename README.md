@@ -8,10 +8,10 @@ formulário de nova tarefa e preenche os valores do perfil escolhido.
 
 São **duas planilhas e duas tarefas**, uma planilha para cada perfil:
 
-| Perfil (`--tarefa`) | Descrição gravada |
-| --- | --- |
-| `faturamento-final` | `FATURAMENTO FINAL` |
-| `defesa-faturada` | `DEFESA FATURADA` |
+| Perfil (`--tarefa`) | Descrição gravada | Exige no nome da planilha |
+| --- | --- | --- |
+| `faturamento-final` | `FATURAMENTO FINAL` | `Faturamento` |
+| `defesa-faturada` | `DEFESA FATURADA` | `Defesa` |
 
 O resto é igual nos dois:
 
@@ -25,6 +25,11 @@ O resto é igual nos dois:
 Os perfis ficam em `PERFIS`, em `src/config.py`. São nomeados em vez de texto
 livre na linha de comando porque parear a planilha de uma tarefa com a descrição
 da outra criaria centenas de tarefas indevidas.
+
+Pela mesma razão cada perfil exige um trecho no nome do arquivo (`dica_arquivo`):
+se você mandar a planilha de defesas com `--tarefa faturamento-final`, a rodada
+é abortada antes de começar. Quando o par estiver certo mas o arquivo não seguir
+a convenção de nome, `--forcar-planilha` passa por cima.
 
 ## Requisitos
 
@@ -62,7 +67,7 @@ One não encontra. `--so-buscar` só pesquisa, sem abrir formulário:
 
 ```bash
 cd src
-python main.py --planilha "C:/Users/Kamila/Downloads/Processos.xlsx" --so-buscar
+python main.py --planilha "C:/Users/Kamila/Downloads/Faturamento.xlsx" --so-buscar
 ```
 
 ### 3. Simulação
@@ -71,13 +76,13 @@ Sem `--executar` o programa preenche o formulário inteiro e **não salva**. É 
 padrão — dá para conferir tudo antes de gravar:
 
 ```bash
-python main.py --planilha "C:/.../Processos.xlsx" --abas 2026 --limite 20
+python main.py --planilha "C:/.../Faturamento.xlsx" --abas 2026 --limite 20
 ```
 
 ### 4. Rodada real
 
 ```bash
-python main.py --planilha "C:/.../Processos.xlsx" --executar
+python main.py --planilha "C:/.../Faturamento.xlsx" --executar
 ```
 
 ### 5. Cota diária, alternando as duas planilhas
@@ -277,7 +282,7 @@ fila, e escrever no arquivo de cima apagaria a lista acumulada das rodadas de
 verdade. É assim que se levanta o que não existe no Legal One sem cadastrar nada:
 
 ```bash
-python main.py --planilha "C:/.../Processos.xlsx" --so-buscar
+python main.py --planilha "C:/.../Faturamento.xlsx" --so-buscar
 ```
 
 **`data/cadastrados_AAAA-MM-DD.xlsx`** — a planilha Excel do dia, gerada
