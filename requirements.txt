@@ -1,4 +1,4 @@
-# Dependencias do cadastro em lote de FATURAMENTO FINAL
+# Dependencias do cadastro em lote de tarefas no Legal One
 
 # Selenium — conecta ao Chrome ja aberto via debuggerAddress
 selenium==4.41.0

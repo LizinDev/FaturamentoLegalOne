@@ -6,6 +6,10 @@ direto no Legal One (`hasson.novajus.com.br`), via Selenium.
 Para cada linha da planilha o programa busca o processo pelo número CNJ, abre o
 formulário de nova tarefa e preenche os valores do perfil escolhido.
 
+> Para operar no dia a dia — todas as flags, códigos de saída e o que fazer
+> quando algo dá errado —, veja o **[Manual de operação](MANUAL.md)**. Este
+> README explica as decisões de projeto por trás do comportamento.
+
 São **duas planilhas e duas tarefas**, uma planilha para cada perfil:
 
 | Perfil (`--tarefa`) | Descrição gravada | Exige no nome da planilha |
