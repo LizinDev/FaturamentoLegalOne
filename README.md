@@ -37,107 +37,22 @@ a convenção de nome, `--forcar-planilha` passa por cima.
 
 ## Requisitos
 
-- Python 3.10+
+- Python 3.10+ (`pip install -r requirements.txt`)
 - Google Chrome, aberto em modo debug e logado no Legal One
 
-```bash
-pip install -r requirements.txt
-```
+O programa **nunca abre uma instância nova** de Chrome: conecta na que já está
+aberta e trabalha numa aba própria, sem mexer nas outras abas. É a sessão dessa
+janela que ele usa — daí a exigência de estar logado antes.
 
-Para mexer no código, veja [Desenvolvimento](#desenvolvimento).
-
-## Como usar
-
-### 1. Abrir o Chrome em modo debug
-
-```powershell
-# Windows
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\ChromeDebug"
-```
-
-```bash
-# Linux
-google-chrome --remote-debugging-port=9222 --user-data-dir=~/ChromeDebug
-```
-
-Faça login no Legal One nesse Chrome antes de rodar. O programa **nunca abre uma
-instância nova** — ele se conecta à que já está aberta e trabalha numa aba
-própria, sem mexer nas suas outras abas.
-
-### 2. Pré-voo: quais processos existem no Legal One?
-
-Antes de cadastrar qualquer coisa, vale saber quais números da planilha o Legal
-One não encontra. `--so-buscar` só pesquisa, sem abrir formulário:
-
-```bash
-cd src
-python main.py --planilha "C:/Users/Kamila/Downloads/Faturamento.xlsx" --so-buscar
-```
-
-### 3. Simulação
-
-Sem `--executar` o programa preenche o formulário inteiro e **não salva**. É o
-padrão — dá para conferir tudo antes de gravar:
-
-```bash
-python main.py --planilha "C:/.../Faturamento.xlsx" --abas 2026 --limite 20
-```
-
-### 4. Rodada real
-
-```bash
-python main.py --planilha "C:/.../Faturamento.xlsx" --executar
-```
-
-### 5. Cota diária, alternando as duas planilhas
-
-Para ~500 cadastros por dia, é o mesmo comando com `--max-cadastros`, mudando a
-planilha e o perfil a cada dia:
-
-```bash
-# um dia
-python main.py --planilha "C:/.../Faturamento.xlsx" --tarefa faturamento-final --max-cadastros 500 --executar
-
-# no outro
-python main.py --planilha "C:/.../Defesa.xlsx" --tarefa defesa-faturada --max-cadastros 500 --executar
-```
-
-Não é preciso controlar por onde parou, nem qual foi a última: o ledger guarda o
-progresso **por tarefa**, então cada rodada pega os próximos 500 ainda não
-cadastrados daquele perfil. Ao terminar, a planilha do dia é gerada sozinha.
-
-Duas flags parecidas, com contas diferentes:
-
-| Flag | Conta o quê |
-| --- | --- |
-| `--max-cadastros 500` | Para em **500 tarefas cadastradas**. Processos não encontrados e os que já tinham a tarefa não consomem cota. |
-| `--limite 500` | Para depois de **500 processos examinados**, cadastrando quantos der (~375, já que cerca de 1 em 4 não existe no Legal One). |
-
-Para a meta do supervisor, `--max-cadastros` é a que corresponde ao número
-combinado.
-
-## Opções
-
-| Opção | O que faz |
-| --- | --- |
-| `--planilha CAMINHO` | Caminho do `.xlsx` de cobranças |
-| `--tarefa PERFIL` | `faturamento-final` (padrão) ou `defesa-faturada` |
-| `--forcar-planilha` | Ignora a trava que confere planilha × perfil |
-| `--abas NOME [NOME...]` | Só estas abas (padrão: todas) |
-| `--tipo-contem TEXTO` | Filtra `TIPO DE COBRANÇA` por trecho do texto |
-| `--status-planilha TEXTO` | Filtra `STATUS LEGAL ONE` exato (ex.: `Ativo`) |
-| `--limite N` | Examina no máximo N processos (conta os não encontrados) |
-| `--max-cadastros N` | Para depois de N tarefas efetivamente cadastradas |
-| `--data DD/MM/AAAA` | Data da tarefa (padrão: hoje) |
-| `--executar` | Grava de verdade — sem isso, apenas simula |
-| `--retentar` | Tenta de novo os que deram erro / não foram encontrados |
-| `--rapido` | Pula a checagem de tarefa duplicada — **leia o aviso abaixo** |
-| `--so-buscar` | Pré-voo: só procura os processos, não abre formulário |
-| `--processo CNJ [CNJ...]` | Roda só estes números (testar ou refazer um caso) |
-| `--relatorio` | Só refaz os relatórios do que já rodou e sai |
-| `--dia AAAA-MM-DD` | Com `--relatorio`, refaz a planilha de um dia específico |
+O passo a passo (abrir o Chrome, pré-voo, simulação, rodada real, cota do dia) e
+a referência completa das flags estão no
+**[Manual de operação](MANUAL.md)**. Para mexer no código, veja
+[Desenvolvimento](#desenvolvimento).
 
 ## Aviso sobre `--rapido`
+
+A flag `--rapido` pula a checagem de tarefa duplicada, economizando uma página
+por processo. O ganho é real e a armadilha também.
 
 Parte dos processos **já tem a tarefa cadastrada antes de o programa rodar**,
 feita à mão. Confirmado em produção: o processo `0088829-65.2025.8.05.0001` já
@@ -228,32 +143,10 @@ exportados antes de terminar. Cada arquivo é gravado por conta própria: se o
 `relatorio.csv` estiver aberto no Excel (o Windows recusa a escrita), o erro
 aparece no log e os outros arquivos saem do mesmo jeito.
 
-### Código de saída
-
-Para quem for agendar a rodada num script:
-
-| Código | Significado |
-| --- | --- |
-| `0` | Rodada completa, ou nada a fazer |
-| `1` | Rodada abortada: sessão expirada, disjuntor ou Chrome fora do ar |
-| `2` | Erro de uso: argumento ou planilha inválida |
-| `130` | Interrompida com `Ctrl+C` |
-
-Atenção: `1` significa que **a fila não terminou**, e não que os cadastros
-feitos até ali se perderam — esses estão no ledger. É só rodar de novo.
-
-### O que vigiar durante a rodada
-
-O log sai no console e em `logs/faturamento.log`. A cada 25 processos aparece
-uma linha de progresso com ritmo, tempo decorrido, ETA e o placar:
-
-```
-... 250/11954 | 9.6s/processo | decorrido 0h40m | falta ~31h12m | {'ok': 187, 'erro': 2, 'nao_encontrado': 61, 'ja_existia': 0}
-```
-
-`erro` subindo rápido é sinal de que algo mudou no Legal One — vale parar e
-olhar. `nao_encontrado` alto é esperado (boa parte da planilha é de processo
-antigo que não está no Legal One).
+A rodada distingue essas saídas no **código de saída**, para quem for agendá-la
+num script: `1` quer dizer que a fila não terminou, e não que os cadastros
+feitos até ali se perderam. A tabela dos códigos e o que vigiar no log durante a
+rodada estão no [Manual de operação](MANUAL.md#códigos-de-saída).
 
 ## Relatórios
 
@@ -283,11 +176,8 @@ então é **acumulado**: traz o que todas as rodadas já levantaram, e não só 
 **`data/nao_encontrados_simulacao.csv`** — a mesma lista, quando a rodada é
 simulação. Mesmas colunas, arquivo separado: uma simulação só enxerga a própria
 fila, e escrever no arquivo de cima apagaria a lista acumulada das rodadas de
-verdade. É assim que se levanta o que não existe no Legal One sem cadastrar nada:
-
-```bash
-python main.py --planilha "C:/.../Faturamento.xlsx" --so-buscar
-```
+verdade. É assim (com `--so-buscar`) que se levanta o que não existe no Legal
+One sem cadastrar nada.
 
 **`data/cadastrados_AAAA-MM-DD.xlsx`** — a planilha Excel do dia, gerada
 automaticamente ao fim de toda rodada real que tenha cadastrado alguma coisa.
@@ -303,22 +193,16 @@ duas aparecem no mesmo arquivo, separadas pela coluna `TAREFA`.
 Os valores fixos da tarefa são repetidos em toda linha de propósito: assim a
 planilha se explica sozinha para quem recebe e não acompanhou a execução.
 
-Para refazer a de um dia anterior:
-
-```bash
-python main.py --relatorio --dia 2026-07-30
-```
-
-Sem `--dia`, `--relatorio` refaz a planilha de todos os dias que têm cadastro.
+Qualquer um desses arquivos pode ser refeito depois com `--relatorio`
+([manual](MANUAL.md#relatórios)).
 
 ## Planilha esperada
 
-Qualquer aba que tenha uma coluna `PROCESSO` no cabeçalho da primeira linha.
-Também são lidas, quando existem, `TIPO DE COBRANÇA` e `STATUS LEGAL ONE` — só
-para os filtros e para o relatório.
+O formato aceito está no [manual](MANUAL.md#a-planilha-de-entrada). Duas
+decisões por trás dele:
 
-Números repetidos entre abas viram **um processo só** (a tarefa é cadastrada uma
-única vez), e a origem agregada aparece no relatório.
+Números repetidos entre abas viram **um processo só** — a tarefa é cadastrada
+uma vez, e a origem agregada aparece no relatório.
 
 Número no formato `0064904.50.2019.8.05.0001` (ponto no lugar do primeiro hífen)
 é corrigido automaticamente. Números realmente quebrados são tentados como
