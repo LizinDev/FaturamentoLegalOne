@@ -1,8 +1,9 @@
 """Cadastro em lote de tarefas no Legal One.
 
 Le a planilha de cobrancas, encontra cada processo no Legal One e cadastra a
-tarefa do perfil escolhido em --tarefa (FATURAMENTO FINAL ou DEFESA FATURADA).
-Por padrao roda em simulacao — precisa de --executar para gravar.
+tarefa do perfil escolhido em --tarefa (FATURAMENTO FINAL ou DEFESA FATURADA),
+ou, com --tarefa auto, a tarefa que a coluna TIPO DE COBRANCA indica em cada
+linha. Por padrao roda em simulacao — precisa de --executar para gravar.
 
 Codigos de saida:
     0    rodada completa (ou nada a fazer)
@@ -84,17 +85,24 @@ def argumentos(argv: list[str] | None = None) -> argparse.Namespace:
   # so a aba 2026, cobrancas de encerramento
   python main.py --planilha "..." --abas 2026 --tipo-contem "ENCERRAMENTO" --executar
 
+  # uma aba que mistura as duas tarefas: cada linha recebe a sua
+  python main.py --planilha "Planilha de Faturamento.xlsx" \\
+      --abas "2019-2020-2021" --tarefa auto --executar
+
   # refazer os relatorios, ou a planilha de um dia especifico
   python main.py --relatorio
   python main.py --relatorio --dia 2026-07-30
 """,
     )
     p.add_argument("--planilha", help="caminho do .xlsx de cobrancas")
-    p.add_argument("--tarefa", choices=sorted(config.PERFIS),
+    p.add_argument("--tarefa",
+                   choices=sorted([*config.PERFIS, config.NOME_AUTO]),
                    default=config.PERFIL_PADRAO,
                    help=f"qual tarefa cadastrar (padrao: {config.PERFIL_PADRAO}). "
                         + " | ".join(f"{n} = {p.descricao!r}"
-                                     for n, p in sorted(config.PERFIS.items())))
+                                     for n, p in sorted(config.PERFIS.items()))
+                        + f" | {config.NOME_AUTO} = a tarefa de cada linha vem da "
+                          f"coluna {config.COLUNA_TIPO_COBRANCA!r}")
     p.add_argument("--forcar-planilha", action="store_true",
                    help="ignora a trava que confere se a planilha combina com --tarefa")
     p.add_argument("--abas", nargs="+", help="abas a considerar (padrao: todas)")
@@ -194,6 +202,9 @@ class Rodada:
     continua. So tres coisas interrompem o lote — a cota do dia, a sessao
     expirada e o disjuntor de "nao encontrados" seguidos.
 
+    A tarefa e por processo, nao por rodada: quem traz a sua propria (modo auto)
+    manda, e `perfil` fica so como padrao para quem vem sem nenhuma.
+
     Nao conhece argparse nem Selenium concreto: recebe um automador pronto,
     o que permite exercitar disjuntor, cota e placar sem abrir o Chrome.
     """
@@ -216,7 +227,9 @@ class Rodada:
         # uma rodada longa atravessa a meia-noite, e cada dia tem a sua planilha.
         self.dias_cadastrados: set[str] = set()
         self.cadastradas = 0
-        self.trilha_sem_achar: list[str] = []
+        # Pares (processo, tarefa): numa rodada auto o mesmo numero pode estar
+        # na fila com as duas tarefas, e so uma delas pode ser suspeita.
+        self.trilha_sem_achar: list[tuple[str, str]] = []
         self.disjuntor = False
         self.cota_atingida = False
         self.interrompida = False
@@ -271,12 +284,17 @@ class Rodada:
         if self.disjuntor:
             self._descartar_suspeitos()
 
+    def _perfil_de(self, proc: planilha.Processo) -> config.PerfilTarefa:
+        """Perfil da tarefa deste processo — o da linha, ou o padrao da rodada."""
+        return config.PERFIS_POR_DESCRICAO.get(proc.tarefa, self.perfil)
+
     def _um_processo(self, proc: planilha.Processo, i: int, total: int) -> bool:
         """Trata um processo. Devolve False quando a rodada tem que parar."""
         if not self.automador.aba_viva():
             logger.warning("A aba de trabalho sumiu (fechada?) — recriando")
             self.automador.usar_aba_propria()
 
+        perfil = self._perfil_de(proc)
         self._busca = busca = self.automador.buscar_processo(proc.cnj)
         if not busca.encontrado:
             return self._nao_encontrado(proc, busca, i, total)
@@ -290,22 +308,26 @@ class Rodada:
             return True
 
         if not self.rapido and self.automador.tarefa_ja_existe(
-            busca.id_legalone, self.perfil.descricao
+            busca.id_legalone, perfil.descricao
         ):
             self._anotar(proc, ledger_mod.JA_EXISTIA, busca.id_legalone,
                          "processo ja tinha a tarefa")
             self.contagem["ja_existia"] += 1
-            logger.info("[%d/%d] %s — ja tinha a tarefa, pulando", i, total, proc.cnj)
+            logger.info("[%d/%d] %s — ja tinha %r, pulando",
+                        i, total, proc.cnj, perfil.descricao)
             return True
 
-        resultado = self.automador.cadastrar_tarefa(busca.id_legalone, self.executar)
+        resultado = self.automador.cadastrar_tarefa(
+            busca.id_legalone, self.executar, perfil
+        )
         self._anotar(proc, ledger_mod.OK, busca.id_legalone, resultado)
         self.contagem["ok"] += 1
         self.cadastradas += 1
         if self.executar:
             self.dias_cadastrados.add(datetime.date.today().isoformat())
-        logger.info("[%d/%d] %s -> id %s (%s) %s",
-                    i, total, proc.cnj, busca.id_legalone, busca.status, resultado)
+        logger.info("[%d/%d] %s -> id %s (%s) %r %s",
+                    i, total, proc.cnj, busca.id_legalone, busca.status,
+                    perfil.descricao, resultado)
 
         if self.max_cadastros and self.cadastradas >= self.max_cadastros:
             self.cota_atingida = True
@@ -318,6 +340,7 @@ class Rodada:
         if not proc.formato_ok:
             detalhe = f"{detalhe} (numero fora do padrao CNJ)"
         situacao = ledger_mod.AMBIGUO if busca.ambiguo else ledger_mod.NAO_ENCONTRADO
+        tarefa = self._perfil_de(proc).descricao
 
         self._anotar(proc, situacao, detalhe=detalhe)
         self.nao_encontrados.append({
@@ -325,7 +348,7 @@ class Rodada:
             # O numero de fato pesquisado; difere do original quando a planilha
             # traz ponto no lugar do primeiro hifen.
             "cnj_busca": proc.cnj,
-            "tarefa": self.perfil.descricao,
+            "tarefa": tarefa,
             "situacao": situacao,
             "motivo": detalhe,
             "tipo_cobranca": "; ".join(proc.tipos_cobranca),
@@ -333,7 +356,7 @@ class Rodada:
             "origem": proc.origem,
         })
         self.contagem["nao_encontrado"] += 1
-        self.trilha_sem_achar.append(proc.cnj)
+        self.trilha_sem_achar.append((proc.cnj, tarefa))
         logger.warning("[%d/%d] %s — %s", i, total, proc.cnj, detalhe)
 
         if len(self.trilha_sem_achar) >= config.MAX_NAO_ENCONTRADOS_SEGUIDOS:
@@ -354,7 +377,7 @@ class Rodada:
         if not self.executar:
             return
         self.registro.registrar(
-            proc.cnj, self.perfil.descricao, situacao,
+            proc.cnj, self._perfil_de(proc).descricao, situacao,
             id_legalone=id_legalone,
             detalhe=detalhe,
             origem=proc.origem,
@@ -371,15 +394,20 @@ class Rodada:
         Deixa-los gravados faria a retomada pular justamente os processos que
         nunca chegaram a ser avaliados de verdade.
         """
-        apagados = (self.registro.esquecer(self.trilha_sem_achar,
-                                           self.perfil.descricao)
+        por_tarefa: dict[str, list[str]] = {}
+        for cnj, tarefa in self.trilha_sem_achar:
+            por_tarefa.setdefault(tarefa, []).append(cnj)
+        apagados = (sum(self.registro.esquecer(cnjs, tarefa)
+                        for tarefa, cnjs in por_tarefa.items())
                     if self.executar else 0)
         self.contagem["nao_encontrado"] -= len(self.trilha_sem_achar)
         # Tambem saem da lista de conferencia: nao sao casos para o usuario
         # investigar, sao efeito colateral da queda.
         suspeitos = set(self.trilha_sem_achar)
-        self.nao_encontrados[:] = [n for n in self.nao_encontrados
-                                   if n["cnj_busca"] not in suspeitos]
+        self.nao_encontrados[:] = [
+            n for n in self.nao_encontrados
+            if (n["cnj_busca"], n["tarefa"]) not in suspeitos
+        ]
         logger.error(
             "PARADO: %d processos seguidos sem ser encontrados. Numa rodada "
             "normal isso nao acontece por acaso — provavelmente a sessao do "
@@ -415,8 +443,9 @@ class Rodada:
 
     def resumir(self, conferencia: str, pendentes: int) -> None:
         logger.info("Resumo desta rodada: %s", self.contagem)
-        logger.info("Acumulado em %-18s %s", self.perfil.descricao + ":",
-                    dict(self.registro.resumo(self.perfil.descricao)))
+        for descricao in _descricoes_da_rodada(self.perfil):
+            logger.info("Acumulado em %-18s %s", descricao + ":",
+                        dict(self.registro.resumo(descricao)))
         logger.info("Acumulado geral:     %s", dict(self.registro.resumo()))
         logger.info("Relatorio:            %s", config.RELATORIO_CSV)
         logger.info("Para conferir a mao:  %s (%d processo[s])",
@@ -430,6 +459,13 @@ class Rodada:
 
 
 # --- preparacao da rodada ----------------------------------------------------
+
+def _descricoes_da_rodada(perfil: config.PerfilTarefa) -> list[str]:
+    """Tarefas que a rodada pode cadastrar — no modo auto, todas elas."""
+    if perfil.nome == config.NOME_AUTO:
+        return list(config.PERFIS_POR_DESCRICAO)
+    return [perfil.descricao]
+
 
 def _conferir_planilha(args: argparse.Namespace, perfil: config.PerfilTarefa) -> None:
     """Trava contra rodar a planilha de uma tarefa com o perfil da outra.
@@ -460,16 +496,22 @@ def _data_da_tarefa(args: argparse.Namespace) -> str:
 
 def _montar_fila(args: argparse.Namespace, registro: ledger_mod.Ledger,
                  perfil: config.PerfilTarefa, processos: list[planilha.Processo]
-                 ) -> tuple[list[planilha.Processo], list[planilha.Processo], set[str]]:
-    """Aplica ledger, --processo e --limite. Devolve (processos, fila, pular)."""
+                 ) -> tuple[list[planilha.Processo], list[planilha.Processo],
+                            set[tuple[str, str]]]:
+    """Aplica ledger, --processo e --limite. Devolve (processos, fila, pular).
+
+    O que ja foi feito e um par (processo, tarefa), nunca so o processo: um
+    numero que ja recebeu a defesa continua devendo o faturamento final.
+    """
     # Uma simulacao nao deixa rastro no ledger; pular o que ja esta la faria a
     # simulacao mentir sobre o tamanho da rodada real seguinte.
     if not args.executar:
-        pular: set[str] = set()
-    elif args.retentar:
-        pular = registro.concluidos(perfil.descricao)
+        pular: set[tuple[str, str]] = set()
     else:
-        pular = registro.todos(perfil.descricao)
+        feitos = registro.concluidos if args.retentar else registro.todos
+        pular = {(cnj, descricao)
+                 for descricao in _descricoes_da_rodada(perfil)
+                 for cnj in feitos(descricao)}
 
     if args.processo:
         # Normaliza igual a planilha, para o numero digitado casar.
@@ -480,7 +522,9 @@ def _montar_fila(args: argparse.Namespace, registro: ledger_mod.Ledger,
             logger.warning("Nao esta(o) na planilha: %s", ", ".join(sorted(faltando)))
         pular = set()
 
-    fila = [p for p in processos if p.cnj not in pular]
+    # Processo sem tarefa propria e o caso de sempre: a tarefa da rodada inteira.
+    fila = [p for p in processos
+            if (p.cnj, p.tarefa or perfil.descricao) not in pular]
     if args.limite:
         fila = fila[: args.limite]
     return processos, fila, pular
@@ -488,11 +532,19 @@ def _montar_fila(args: argparse.Namespace, registro: ledger_mod.Ledger,
 
 def _log_cabecalho(args: argparse.Namespace, perfil: config.PerfilTarefa,
                    data_tarefa: str, processos: list, fila: list,
-                   pular: set[str]) -> None:
+                   pular: set[tuple[str, str]]) -> None:
     logger.info("Perfil:      %s", perfil.nome)
-    logger.info("Tarefa:      %r / tipo %r / status %r",
-                perfil.descricao, perfil.tipo, perfil.status)
-    logger.info("Responsavel: %s", perfil.responsavel_esperado)
+    if perfil.nome == config.NOME_AUTO:
+        logger.info("Tarefa:      de cada linha, pela coluna %r",
+                    config.COLUNA_TIPO_COBRANCA)
+        for descricao in _descricoes_da_rodada(perfil):
+            quantos = sum(1 for p in processos if p.tarefa == descricao)
+            logger.info("             %-18s %d processo(s)",
+                        descricao + ":", quantos)
+    else:
+        logger.info("Tarefa:      %r / tipo %r / status %r",
+                    perfil.descricao, perfil.tipo, perfil.status)
+        logger.info("Responsavel: %s", perfil.responsavel_esperado)
     logger.info("Data:        %s", data_tarefa)
     logger.info("Planilha:    %s", args.planilha)
     logger.info("             %d processo(s) unico(s)", len(processos))
@@ -530,7 +582,8 @@ def _modo_rodada(args: argparse.Namespace) -> int:
     if args.dia:
         logger.warning("--dia so vale com --relatorio; ignorando.")
 
-    perfil = config.PERFIS[args.tarefa]
+    auto = args.tarefa == config.NOME_AUTO
+    perfil = config.PERFIL_AUTO if auto else config.PERFIS[args.tarefa]
     _conferir_planilha(args, perfil)
     data_tarefa = _data_da_tarefa(args)
 
@@ -540,6 +593,7 @@ def _modo_rodada(args: argparse.Namespace) -> int:
             abas=args.abas,
             tipo_contem=args.tipo_contem,
             status_planilha=args.status_planilha,
+            tarefa_da_linha=config.tarefa_do_tipo if auto else None,
         )
     except (FileNotFoundError, ValueError) as e:
         raise ErroDeUso(str(e)) from e

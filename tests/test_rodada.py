@@ -17,9 +17,11 @@ from conftest import situacao_de
 CNJ = "0000001-11.2025.8.05.0001"
 
 
-def processo(cnj=CNJ, formato_ok=True, origem="2026!L2", cnj_original=None):
+def processo(cnj=CNJ, formato_ok=True, origem="2026!L2", cnj_original=None,
+             tarefa=""):
     return planilha.Processo(
         cnj=cnj, cnj_original=cnj_original or cnj, formato_ok=formato_ok,
+        tarefa=tarefa,
         tipos_cobranca=["ENCERRAMENTO"], status_planilha=["Ativo"],
         linhas=[origem],
     )
@@ -37,6 +39,10 @@ class AutomadorFalso:
         self.ja_existentes = set(ja_existentes)
         self.ao_cadastrar = ao_cadastrar
         self.cadastrados: list[tuple[str, bool]] = []
+        # Descricao pedida em cada cadastro e em cada checagem de duplicata: e o
+        # que prova de quem veio a tarefa, se da linha ou do perfil da rodada.
+        self.tarefas: list[str] = []
+        self.duplicatas_checadas: list[str] = []
         self.buscados: list[str] = []
         self.checagens_de_duplicata = 0
         self.abas_criadas = 0
@@ -61,12 +67,14 @@ class AutomadorFalso:
 
     def tarefa_ja_existe(self, id_legalone, descricao):
         self.checagens_de_duplicata += 1
+        self.duplicatas_checadas.append(descricao)
         return id_legalone in self.ja_existentes
 
-    def cadastrar_tarefa(self, id_legalone, executar):
+    def cadastrar_tarefa(self, id_legalone, executar, perfil=None):
         if self.ao_cadastrar is not None:
             raise self.ao_cadastrar
         self.cadastrados.append((id_legalone, executar))
+        self.tarefas.append(perfil.descricao if perfil else None)
         return "cadastrada" if executar else "simulado (formulario preenchido, nao salvo)"
 
 
@@ -149,6 +157,70 @@ def test_aba_fechada_e_recriada_sem_perder_o_processo(registro, perfil):
 
     assert automador.abas_criadas == 1
     assert automador.cadastrados == [("111", True)]
+
+
+# --- tarefa que vem da linha (modo auto) -------------------------------------
+
+DEFESA = config.PERFIS["defesa-faturada"].descricao
+FINAL = config.PERFIS["faturamento-final"].descricao
+
+
+def rodada_auto(automador, registro, **kw):
+    """Rodada sem tarefa propria: quem manda e a tarefa de cada processo."""
+    return main.Rodada(automador, registro, config.PERFIL_AUTO, **kw)
+
+
+def test_cada_linha_recebe_a_tarefa_que_a_planilha_mandou(registro):
+    automador = AutomadorFalso({"A": achou("111"), "B": achou("222")})
+    r = rodada_auto(automador, registro, executar=True)
+
+    r.executar_fila([processo("A", tarefa=DEFESA), processo("B", tarefa=FINAL)])
+
+    assert automador.tarefas == [DEFESA, FINAL]
+    # A checagem de duplicata tem que perguntar pela mesma tarefa que vai ser
+    # cadastrada — senao acharia sempre "nao existe" e criaria duplicata.
+    assert automador.duplicatas_checadas == [DEFESA, FINAL]
+    assert situacao_de(registro, "A", DEFESA) == ledger_mod.OK
+    assert situacao_de(registro, "B", FINAL) == ledger_mod.OK
+    assert r.contagem["ok"] == 2
+
+
+def test_mesmo_processo_com_as_duas_tarefas_recebe_as_duas(registro):
+    # Defesa faturada e faturamento final sao etapas diferentes do mesmo caso.
+    automador = AutomadorFalso({CNJ: achou("111")})
+    r = rodada_auto(automador, registro, executar=True)
+
+    r.executar_fila([processo(tarefa=DEFESA), processo(tarefa=FINAL)])
+
+    assert automador.tarefas == [DEFESA, FINAL]
+    assert situacao_de(registro, CNJ, DEFESA) == ledger_mod.OK
+    assert situacao_de(registro, CNJ, FINAL) == ledger_mod.OK
+    assert r.cadastradas == 2
+
+
+def test_nao_encontrado_guarda_a_tarefa_da_linha(registro):
+    r = rodada_auto(AutomadorFalso(), registro, executar=True)
+
+    r.executar_fila([processo(tarefa=DEFESA)])
+
+    assert situacao_de(registro, CNJ, DEFESA) == ledger_mod.NAO_ENCONTRADO
+    assert situacao_de(registro, CNJ, FINAL) is None
+    assert r.nao_encontrados[0]["tarefa"] == DEFESA
+
+
+def test_disjuntor_devolve_a_fila_com_as_duas_tarefas(registro, monkeypatch):
+    # Sessao caida numa rodada mista: os dois pares (processo, tarefa) tem que
+    # voltar para a fila, e nao so os de uma das tarefas.
+    monkeypatch.setattr(config, "MAX_NAO_ENCONTRADOS_SEGUIDOS", 2)
+    r = rodada_auto(AutomadorFalso(), registro, executar=True)
+
+    r.executar_fila([processo("A", tarefa=DEFESA), processo("B", tarefa=FINAL)])
+
+    assert r.disjuntor is True
+    assert registro.todos(DEFESA) == set()
+    assert registro.todos(FINAL) == set()
+    assert r.nao_encontrados == []
+    assert r.contagem["nao_encontrado"] == 0
 
 
 # --- nao encontrados ---------------------------------------------------------

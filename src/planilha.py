@@ -1,7 +1,9 @@
 """Leitura da planilha de cobrancas -> lista de processos unicos."""
+import collections
 import dataclasses
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -24,6 +26,9 @@ class Processo:
     cnj: str                 # numero normalizado, usado na busca
     cnj_original: str        # como estava na planilha
     formato_ok: bool
+    # Descricao da tarefa a cadastrar neste processo. Vazia quando a tarefa vale
+    # para a rodada toda; preenchida quando ela sai da propria linha.
+    tarefa: str = ""
     tipos_cobranca: list[str] = dataclasses.field(default_factory=list)
     status_planilha: list[str] = dataclasses.field(default_factory=list)
     # Onde o processo aparece, no formato "aba!Lnn" — um processo repetido em
@@ -75,12 +80,19 @@ def ler(
     abas: list[str] | None = None,
     tipo_contem: str | None = None,
     status_planilha: str | None = None,
+    tarefa_da_linha: Callable[[str], str | None] | None = None,
 ) -> list[Processo]:
     """Le a planilha e devolve os processos unicos, na ordem de aparicao.
 
     abas             — nomes de abas a considerar (None = todas)
     tipo_contem      — filtra por substring em TIPO DE COBRANCA (case-insensitive)
     status_planilha  — filtra por STATUS LEGAL ONE exato (ex.: "Ativo")
+    tarefa_da_linha  — recebe o TIPO DE COBRANCA e devolve a descricao da tarefa
+                       daquela linha, ou None para "nao reconheco isto" (a linha
+                       e pulada). Com esta funcao a deduplicacao passa a ser por
+                       (processo, tarefa): o mesmo numero que aparece como defesa
+                       e como faturamento precisa das duas tarefas, e deduplicar
+                       so pelo numero perderia uma delas.
     """
     caminho = Path(caminho)
     if not caminho.is_file():
@@ -96,8 +108,11 @@ def ler(
                 f"Disponiveis: {wb.sheetnames}"
             )
 
-        por_cnj: dict[str, Processo] = {}
+        # A chave e o par (numero, tarefa). Sem tarefa_da_linha a tarefa e "" em
+        # todas as linhas e o par se comporta como a chave so pelo numero.
+        por_chave: dict[tuple[str, str], Processo] = {}
         total_linhas = 0
+        nao_reconhecidos: collections.Counter = collections.Counter()
 
         for nome in alvo:
             ws = wb[nome]
@@ -126,13 +141,24 @@ def ler(
                 if status_planilha and status != status_planilha:
                     continue
 
+                tarefa = ""
+                if tarefa_da_linha is not None:
+                    tarefa = tarefa_da_linha(tipo) or ""
+                    if not tarefa:
+                        # Pular e mais seguro do que chutar uma tarefa: a coluna
+                        # e texto livre e as abas mais novas tem dezenas de
+                        # variantes. Os valores saem no aviso do fim.
+                        nao_reconhecidos[tipo or "(vazio)"] += 1
+                        continue
+
                 total_linhas += 1
                 cnj, ok = normalizar(bruto)
 
-                proc = por_cnj.get(cnj)
+                proc = por_chave.get((cnj, tarefa))
                 if proc is None:
-                    proc = Processo(cnj=cnj, cnj_original=bruto, formato_ok=ok)
-                    por_cnj[cnj] = proc
+                    proc = Processo(cnj=cnj, cnj_original=bruto, formato_ok=ok,
+                                    tarefa=tarefa)
+                    por_chave[(cnj, tarefa)] = proc
 
                 if tipo and tipo not in proc.tipos_cobranca:
                     proc.tipos_cobranca.append(tipo)
@@ -142,10 +168,17 @@ def ler(
     finally:
         wb.close()
 
-    processos = list(por_cnj.values())
+    processos = list(por_chave.values())
     invalidos = sum(1 for p in processos if not p.formato_ok)
     logger.info(
         "Planilha lida: %d linha(s) -> %d processo(s) unico(s) (%d fora do padrao CNJ)",
         total_linhas, len(processos), invalidos,
     )
+    if nao_reconhecidos:
+        logger.warning(
+            "%d linha(s) puladas por TIPO DE COBRANCA sem tarefa correspondente: %s",
+            sum(nao_reconhecidos.values()),
+            "; ".join(f"{valor!r} ({n})"
+                      for valor, n in nao_reconhecidos.most_common()),
+        )
     return processos

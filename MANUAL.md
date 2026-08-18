@@ -82,6 +82,16 @@ O nome do arquivo não é livre: cada perfil exige um trecho no caminho da
 planilha (`Faturamento` e `Defesa`) e recusa o par errado com código 2 — ver
 [`--forcar-planilha`](#valores-da-tarefa).
 
+**Planilha única, com as duas tarefas misturadas na mesma aba:**
+
+```powershell
+python main.py --planilha "..\Planilha de Faturamento.xlsx" --abas "2019-2020-2021" --tarefa auto --max-cadastros 500 --executar
+```
+
+Aqui não se alterna planilha: cada linha recebe a tarefa que a coluna
+`TIPO DE COBRANÇA` indica, e a cota do dia sai da fila inteira. Ver
+[`--tarefa auto`](#valores-da-tarefa).
+
 Não é preciso anotar por onde parou nem qual planilha foi a última. O ledger
 guarda o progresso **por tarefa**, então cada rodada pega os próximos 500 ainda
 não cadastrados daquele perfil. Ao terminar, a planilha do dia é gerada sozinha
@@ -107,7 +117,7 @@ precisa estar presente**.
 | Flag | Argumento | Padrão |
 | --- | --- | --- |
 | `--planilha` | caminho do `.xlsx` | — (obrigatória, salvo com `--relatorio`) |
-| `--tarefa` | `faturamento-final` \| `defesa-faturada` | `faturamento-final` |
+| `--tarefa` | `faturamento-final` \| `defesa-faturada` \| `auto` | `faturamento-final` |
 | `--forcar-planilha` | — | desligada |
 | `--abas` | um ou mais nomes de aba | todas as abas |
 | `--tipo-contem` | trecho de texto | sem filtro |
@@ -199,10 +209,36 @@ Escolhe qual tarefa cadastrar. O perfil define a descrição gravada:
 | --- | --- |
 | `faturamento-final` | `FATURAMENTO FINAL` |
 | `defesa-faturada` | `DEFESA FATURADA` |
+| `auto` | a que a coluna `TIPO DE COBRANÇA` disser, linha a linha |
 
 Tipo (`Diversos`), status (`Cumprido`) e responsável (`Heloiza Helena de
 Araujo`) são iguais nos dois. O ledger é indexado por **(processo, tarefa)**, de
 modo que o mesmo processo pode receber as duas sem que uma rodada pule a outra.
+
+**`--tarefa auto`** é para a planilha que mistura as duas tarefas na mesma aba.
+Cada linha recebe a tarefa que a sua coluna `TIPO DE COBRANÇA` indica:
+
+| Célula (ignorando caixa e espaços) | Tarefa cadastrada |
+| --- | --- |
+| `FATURAMENTO FINAL` | `FATURAMENTO FINAL` |
+| `DEFESA FATURADA` | `DEFESA FATURADA` |
+| qualquer outro texto | nenhuma — a linha é pulada |
+
+As linhas puladas saem num aviso no log, com a lista dos valores e quantas
+linhas cada um tinha:
+
+```
+1834 linha(s) puladas por TIPO DE COBRANCA sem tarefa correspondente:
+'CONTESTAÇÃO' (612); 'ÊXITO' (410); 'Acordo' (23)
+```
+
+Neste modo não há trava por nome de arquivo (a garantia vem da célula de cada
+linha), e o mesmo número que aparece com as duas cobranças recebe **as duas
+tarefas** — são etapas diferentes do mesmo caso.
+
+```powershell
+python main.py --planilha "..\Planilha de Faturamento.xlsx" --abas "2019-2020-2021" --tarefa auto --max-cadastros 500 --executar
+```
 
 **`--data DD/MM/AAAA`**
 
@@ -379,8 +415,12 @@ Aba sem essa coluna é ignorada com um aviso, e não derruba a leitura.
 | Coluna | Obrigatória | Uso |
 | --- | --- | --- |
 | `PROCESSO` | sim | O número CNJ a buscar |
-| `TIPO DE COBRANÇA` | não | Filtro `--tipo-contem` e coluna dos relatórios |
+| `TIPO DE COBRANÇA` | não | Filtro `--tipo-contem`, coluna dos relatórios e, com `--tarefa auto`, a tarefa daquela linha |
 | `STATUS LEGAL ONE` | não | Filtro `--status-planilha` e coluna dos relatórios |
+
+Os nomes das colunas são reconhecidos sem ligar para maiúsculas nem espaços
+sobrando, mas o acento conta: `TIPO DE COBRANCA` sem cedilha não é reconhecida e
+a coluna passa a valer como vazia.
 
 Número no formato `0064904.50.2019.8.05.0001` (ponto no lugar do primeiro hífen)
 é corrigido automaticamente; o relatório mostra as duas versões nas colunas
@@ -410,6 +450,11 @@ PERFIS = {
 trava contra parear a planilha de uma tarefa com o perfil da outra. Se os
 arquivos mudarem de nome, é este campo que se ajusta; deixá-lo vazio desliga a
 conferência daquele perfil.
+
+`--tarefa auto` não é um perfil a mais nessa lista: ele escolhe, para cada
+linha, um dos perfis acima. O casamento é pela descrição — acrescentar um perfil
+novo já o torna disponível no modo auto, com o texto da coluna
+`TIPO DE COBRANÇA` tendo que ser igual à descrição.
 
 ---
 

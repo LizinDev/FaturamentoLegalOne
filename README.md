@@ -10,12 +10,13 @@ formulário de nova tarefa e preenche os valores do perfil escolhido.
 > quando algo dá errado —, veja o **[Manual de operação](MANUAL.md)**. Este
 > README explica as decisões de projeto por trás do comportamento.
 
-São **duas planilhas e duas tarefas**, uma planilha para cada perfil:
+São **duas tarefas**, e três formas de dizer qual cadastrar:
 
 | Perfil (`--tarefa`) | Descrição gravada | Exige no nome da planilha |
 | --- | --- | --- |
 | `faturamento-final` | `FATURAMENTO FINAL` | `Faturamento` |
 | `defesa-faturada` | `DEFESA FATURADA` | `Defesa` |
+| `auto` | a que a coluna `TIPO DE COBRANÇA` disser, linha a linha | — |
 
 O resto é igual nos dois:
 
@@ -34,6 +35,25 @@ Pela mesma razão cada perfil exige um trecho no nome do arquivo (`dica_arquivo`
 se você mandar a planilha de defesas com `--tarefa faturamento-final`, a rodada
 é abortada antes de começar. Quando o par estiver certo mas o arquivo não seguir
 a convenção de nome, `--forcar-planilha` passa por cima.
+
+### `--tarefa auto`
+
+Quando as duas tarefas convivem na mesma aba, separá-las em dois arquivos a cada
+atualização da planilha é trabalho manual que erra. Com `--tarefa auto` a tarefa
+de cada processo sai da própria coluna `TIPO DE COBRANÇA`: `FATURAMENTO FINAL`
+vira a tarefa de faturamento, `DEFESA FATURADA` vira a de defesa, e **qualquer
+outro texto é pulado** com aviso — a coluna é livre e as abas mais novas trazem
+dezenas de variantes (`CONTESTAÇÃO`, `ÊXITO`, `Acordo`) que não são tarefa
+nenhuma. O casamento ignora caixa e espaços sobrando, mas é pelo texto inteiro:
+nada de sinônimo ou pedaço de palavra.
+
+Aqui não há trava por nome de arquivo, e de propósito — a garantia vem da célula
+de cada linha, que é mais forte do que o nome do arquivo.
+
+Neste modo a deduplicação passa a ser por **(processo, tarefa)**, e não só pelo
+processo: na aba `2019-2020-2021` há 38 números que aparecem como defesa *e*
+como faturamento final, etapas diferentes do mesmo caso. Deduplicar só pelo
+número perderia uma das duas tarefas.
 
 ## Requisitos
 
@@ -202,7 +222,8 @@ O formato aceito está no [manual](MANUAL.md#a-planilha-de-entrada). Duas
 decisões por trás dele:
 
 Números repetidos entre abas viram **um processo só** — a tarefa é cadastrada
-uma vez, e a origem agregada aparece no relatório.
+uma vez, e a origem agregada aparece no relatório. Com `--tarefa auto` isso vale
+por tarefa: o mesmo número com as duas cobranças recebe as duas.
 
 Número no formato `0064904.50.2019.8.05.0001` (ponto no lugar do primeiro hífen)
 é corrigido automaticamente. Números realmente quebrados são tentados como
@@ -315,7 +336,11 @@ Para os ~12 mil processos únicos da planilha, o fluxo completo fica na casa das
 
 ## Versão
 
-**1.3.0** — suíte de testes e CI (ver [Desenvolvimento](#desenvolvimento)); o
+**1.4.0** — `--tarefa auto`: a tarefa de cada processo sai da coluna `TIPO DE
+COBRANÇA`, para a planilha que mistura as duas na mesma aba. Com ele, a
+deduplicação e o controle de "já feito" passam a ser por (processo, tarefa).
+
+1.3.0 — suíte de testes e CI (ver [Desenvolvimento](#desenvolvimento)); o
 laço virou a classe `Rodada`, testável sem navegador; a rodada devolve código de
 saída; `--limite`/`--max-cadastros`/`--dia` são validados na linha de comando;
 uma exportação que falha não derruba mais as outras; migração do ledger numa

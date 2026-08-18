@@ -93,6 +93,33 @@ PERFIS = {
 
 PERFIL_PADRAO = "faturamento-final"
 
+# Modo em que a tarefa de cada processo sai da coluna TIPO DE COBRANCA, linha a
+# linha, em vez de valer uma so para a rodada inteira. E para a planilha que
+# mistura as duas tarefas na mesma aba.
+NOME_AUTO = "auto"
+
+# Aqui nao ha trava de nome de arquivo, e de proposito: a garantia de nao parear
+# planilha errada com tarefa errada vem da propria celula de cada linha, que e
+# mais forte do que o nome do arquivo.
+PERFIL_AUTO = PerfilTarefa(NOME_AUTO, "(da coluna TIPO DE COBRANÇA)")
+
+# Descricao -> perfil. Serve para resolver a tarefa de uma linha da planilha no
+# modo auto e para reconstruir tipo/status/responsavel a partir do que ficou
+# gravado no ledger (que guarda so a descricao).
+PERFIS_POR_DESCRICAO = {p.descricao: p for p in PERFIS.values()}
+
+_DESCRICOES_POR_TIPO = {d.upper(): d for d in PERFIS_POR_DESCRICAO}
+
+
+def tarefa_do_tipo(tipo: str) -> str | None:
+    """Tarefa correspondente a um TIPO DE COBRANCA da planilha (None se nenhuma).
+
+    O casamento e pelo texto inteiro, ignorando caixa e espacos sobrando. Nao ha
+    sinonimo nem casamento por pedaco: a coluna e texto livre, e "CONTESTACAO" ou
+    "ENCERRAMENTO S/ EXITO" nao devem virar tarefa por acidente.
+    """
+    return _DESCRICOES_POR_TIPO.get(" ".join(str(tipo).split()).upper())
+
 # "Nao cumprido" contem "Cumprido": o casamento no lookup precisa ser exato.
 STATUS_VALIDOS = {
     "Pendente": "0",
@@ -140,5 +167,5 @@ def planilha_do_dia(dia: str) -> str:
     return str(DATA_DIR / f"cadastrados_{dia}.xlsx")
 
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 PROJECT_NAME = "Cadastro de tarefas em lote - Legal One"

@@ -54,13 +54,11 @@ def gerar_planilha_do_dia(caminho: str | Path, dia: str, linhas: list[tuple]) ->
         celula.alignment = Alignment(horizontal="center", vertical="center")
         ws.column_dimensions[get_column_letter(coluna)].width = largura
 
-    # Descricao -> perfil, para preencher status/tipo/responsavel de cada linha.
-    # Um mesmo dia pode ter as duas tarefas, se as rodadas forem no mesmo dia.
-    por_descricao = {p.descricao: p for p in config.PERFIS.values()}
-
     for i, linha in enumerate(linhas, 2):
         cnj, tarefa, id_lo, tipo_cob, status_pl, origem, quando = linha
-        perfil = por_descricao.get(tarefa)
+        # O ledger guarda so a descricao; o perfil devolve status, tipo e
+        # responsavel. Um mesmo dia pode ter as duas tarefas.
+        perfil = config.PERFIS_POR_DESCRICAO.get(tarefa)
         ws.cell(row=i, column=1, value=cnj)
         ws.cell(row=i, column=2, value=int(id_lo) if str(id_lo).isdigit() else id_lo)
         # Os valores da tarefa sao fixos por perfil; repeti-los em cada linha

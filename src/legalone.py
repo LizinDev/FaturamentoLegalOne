@@ -360,41 +360,45 @@ class AutomadorLegalOne:
           .map(e => e.innerText.trim()).filter(t => t).join(' | ');
         """) or ""
 
-    def cadastrar_tarefa(self, id_legalone: str, executar: bool) -> str:
+    def cadastrar_tarefa(self, id_legalone: str, executar: bool,
+                         perfil: "config.PerfilTarefa | None" = None) -> str:
         """Preenche o formulario da tarefa. So salva se executar=True.
 
-        Devolve uma descricao curta do que foi feito.
+        perfil sobrepoe o do automador — e assim que uma rodada unica cadastra
+        tarefas diferentes, uma por linha da planilha. Devolve uma descricao
+        curta do que foi feito.
         """
+        perfil = perfil or self.perfil
         self._ir_para(config.URL_NOVA_TAREFA.format(id=id_legalone))
 
         campo_desc = self.wait.until(
             EC.visibility_of_element_located((By.ID, "Descricao"))
         )
         campo_desc.clear()
-        campo_desc.send_keys(self.perfil.descricao)
+        campo_desc.send_keys(perfil.descricao)
 
         # A descricao e o que identifica a tarefa depois — inclusive para a
         # checagem de duplicata. Se um caractere se perder, a tarefa nasce com o
         # texto errado e a rodada seguinte nao reconhece que ela ja existe.
         escrito = campo_desc.get_attribute("value")
-        if escrito != self.perfil.descricao:
+        if escrito != perfil.descricao:
             raise RuntimeError(
-                f"campo Descricao ficou {escrito!r}, esperava {self.perfil.descricao!r}"
+                f"campo Descricao ficou {escrito!r}, esperava {perfil.descricao!r}"
             )
 
         # Tipo e datas ja vem certos do formulario; confirmamos em vez de
         # reescrever, para nao desfazer o vinculo de TipoId.
         tipo = self.driver.find_element(By.ID, "TipoText").get_attribute("value")
-        if tipo != self.perfil.tipo:
+        if tipo != perfil.tipo:
             raise RuntimeError(
-                f"Tipo padrao mudou: esperava {self.perfil.tipo!r}, veio {tipo!r}"
+                f"Tipo padrao mudou: esperava {perfil.tipo!r}, veio {tipo!r}"
             )
 
         self._preencher_data("DtInicial", self.data_tarefa)
         self._preencher_data("DtFinal", self.data_tarefa)
-        self._selecionar_status(self.perfil.status)
+        self._selecionar_status(perfil.status)
         self._preencher_responsavel(
-            self.perfil.responsavel_busca, self.perfil.responsavel_esperado
+            perfil.responsavel_busca, perfil.responsavel_esperado
         )
 
         erros = self._erros_de_validacao()

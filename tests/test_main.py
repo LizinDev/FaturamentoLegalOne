@@ -142,6 +142,15 @@ def test_perfis_de_verdade_travam_a_planilha_trocada():
     )
 
 
+def test_tarefa_auto_nao_exige_nome_de_arquivo():
+    # No modo auto a garantia vem da celula de cada linha, que e mais forte do
+    # que o nome do arquivo: nao ha planilha "da tarefa errada" para parear.
+    args = main.argumentos(["--planilha", "C:/x/Planilha de Faturamento.xlsx",
+                            "--tarefa", "auto"])
+
+    main._conferir_planilha(args, config.PERFIL_AUTO)
+
+
 def test_planilha_inexistente_vira_erro_de_uso(dados_tmp):
     args = main.argumentos(["--planilha", str(dados_tmp / "nao_existe.xlsx")])
 
@@ -163,7 +172,7 @@ def test_rodada_real_pula_o_que_ja_esta_no_ledger(registro, perfil):
     _, fila, pular = main._montar_fila(args, registro, perfil, _processos("A", "B", "C"))
 
     assert [p.cnj for p in fila] == ["C"]
-    assert pular == {"A", "B"}
+    assert pular == {("A", perfil.descricao), ("B", perfil.descricao)}
 
 
 def test_retentar_refaz_erro_e_nao_encontrado(registro, perfil):
@@ -197,6 +206,18 @@ def test_ledger_e_por_tarefa(registro, perfil):
     _, fila, _ = main._montar_fila(args, registro, perfil, _processos("A"))
 
     assert [p.cnj for p in fila] == ["A"]
+
+
+def test_fila_auto_nao_pula_a_segunda_tarefa_do_mesmo_processo(registro):
+    # O numero ja recebeu a defesa; continua devendo o faturamento final.
+    registro.registrar("A", "DEFESA FATURADA", ledger_mod.OK)
+    args = main.argumentos(["--planilha", "x.xlsx", "--tarefa", "auto", "--executar"])
+    processos = [processo("A", tarefa="DEFESA FATURADA"),
+                 processo("A", tarefa="FATURAMENTO FINAL")]
+
+    _, fila, _ = main._montar_fila(args, registro, config.PERFIL_AUTO, processos)
+
+    assert [p.tarefa for p in fila] == ["FATURAMENTO FINAL"]
 
 
 def test_limite_corta_a_fila(registro, perfil):
@@ -428,6 +449,61 @@ def test_simulacao_nao_deixa_rastro_nenhum(dados_tmp, monkeypatch, tmp_path):
     assert not (dados_tmp / "nao_encontrados.csv").exists()
     hoje = datetime.date.today().isoformat()
     assert not (dados_tmp / f"cadastrados_{hoje}.xlsx").exists()
+
+
+def _planilha_mista(tmp_path):
+    """Como a aba 2019-2020-2021: as duas tarefas na mesma aba, misturadas."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "2019-2020-2021"
+    ws.append(["PROCESSO", "TIPO DE COBRANÇA"])
+    ws.append([ACHADO, "FATURAMENTO FINAL"])
+    ws.append([CORRIGIDO, "DEFESA FATURADA"])
+    # O mesmo processo nas duas etapas, e uma cobranca que nao e tarefa nenhuma.
+    ws.append([CORRIGIDO, "FATURAMENTO FINAL"])
+    ws.append([INEXISTENTE, "CONTESTAÇÃO"])
+    caminho = tmp_path / "Planilha de Faturamento.xlsx"
+    wb.save(caminho)
+    return caminho
+
+
+def test_rodada_auto_cadastra_a_tarefa_que_cada_linha_pede(
+    dados_tmp, monkeypatch, tmp_path
+):
+    arq = _planilha_mista(tmp_path)
+    automador = AutomadorFalso({ACHADO: achou("111"), CORRIGIDO: achou("222")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+
+    assert main.main(
+        ["--planilha", str(arq), "--tarefa", "auto", "--executar"]
+    ) == main.SAIDA_OK
+
+    # A linha de CONTESTACAO nem entrou na fila: nao ha tarefa para ela.
+    assert automador.buscados == [ACHADO, CORRIGIDO, CORRIGIDO]
+    assert automador.tarefas == [
+        "FATURAMENTO FINAL", "DEFESA FATURADA", "FATURAMENTO FINAL",
+    ]
+
+    tarefas_por_processo = {
+        (linha["PROCESSO"], linha["TAREFA"]): linha["SITUACAO"]
+        for linha in _linhas_csv(dados_tmp / "relatorio.csv")
+    }
+    assert tarefas_por_processo == {
+        (ACHADO, "FATURAMENTO FINAL"): "ok",
+        (CORRIGIDO, "DEFESA FATURADA"): "ok",
+        (CORRIGIDO, "FATURAMENTO FINAL"): "ok",
+    }
+
+    hoje = datetime.date.today().isoformat()
+    ws = load_workbook(dados_tmp / f"cadastrados_{hoje}.xlsx").active
+    linhas = {(ws.cell(row=i, column=1).value, ws.cell(row=i, column=3).value)
+              for i in range(2, 5)}
+    assert linhas == {
+        (ACHADO, "FATURAMENTO FINAL"),
+        (CORRIGIDO, "DEFESA FATURADA"),
+        (CORRIGIDO, "FATURAMENTO FINAL"),
+    }
 
 
 def test_simulacao_nao_apaga_a_lista_das_rodadas_de_verdade(
