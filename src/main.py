@@ -122,7 +122,11 @@ def argumentos(argv: list[str] | None = None) -> argparse.Namespace:
                    help="tenta de novo os que deram erro/nao encontrado")
     p.add_argument("--rapido", action="store_true",
                    help="pula a checagem de tarefa duplicada "
-                        "(1 pagina a menos por processo)")
+                        "(1 pagina a menos por processo; o relatorio deixa de "
+                        "distinguir cadastro novo de recadastro)")
+    p.add_argument("--pular-existentes", action="store_true",
+                   help="nao cadastra onde a tarefa ja existe (por padrao ela e "
+                        "cadastrada de novo e marcada como recadastrada)")
     p.add_argument("--so-buscar", action="store_true",
                    help="pre-voo: so procura os processos e relata quais nao existem, "
                         "sem abrir formulario (bem mais rapido)")
@@ -212,6 +216,7 @@ class Rodada:
     def __init__(self, automador, registro: ledger_mod.Ledger,
                  perfil: config.PerfilTarefa, *, executar: bool = False,
                  so_buscar: bool = False, rapido: bool = False,
+                 pular_existentes: bool = False,
                  max_cadastros: int | None = None):
         self.automador = automador
         self.registro = registro
@@ -219,9 +224,11 @@ class Rodada:
         self.executar = executar
         self.so_buscar = so_buscar
         self.rapido = rapido
+        self.pular_existentes = pular_existentes
         self.max_cadastros = max_cadastros
 
-        self.contagem = {"ok": 0, "erro": 0, "nao_encontrado": 0, "ja_existia": 0}
+        self.contagem = {"ok": 0, "recadastrada": 0, "erro": 0,
+                         "nao_encontrado": 0, "ja_existia": 0}
         self.nao_encontrados: list[dict] = []
         # Dias em que esta rodada cadastrou alguma coisa. E um conjunto porque
         # uma rodada longa atravessa a meia-noite, e cada dia tem a sua planilha.
@@ -307,9 +314,13 @@ class Rodada:
                         i, total, proc.cnj, busca.id_legalone, busca.status)
             return True
 
-        if not self.rapido and self.automador.tarefa_ja_existe(
+        # A checagem nao decide mais se cadastra — decide o que registrar. A
+        # orientacao de operacao para a tarefa que ja existe e cadastrar de novo
+        # ("pecar pelo excesso"), e o valor da checagem virou saber quais foram.
+        ja_existia = not self.rapido and self.automador.tarefa_ja_existe(
             busca.id_legalone, perfil.descricao
-        ):
+        )
+        if ja_existia and self.pular_existentes:
             self._anotar(proc, ledger_mod.JA_EXISTIA, busca.id_legalone,
                          "processo ja tinha a tarefa")
             self.contagem["ja_existia"] += 1
@@ -320,14 +331,17 @@ class Rodada:
         resultado = self.automador.cadastrar_tarefa(
             busca.id_legalone, self.executar, perfil
         )
-        self._anotar(proc, ledger_mod.OK, busca.id_legalone, resultado)
-        self.contagem["ok"] += 1
+        situacao = ledger_mod.RECADASTRADA if ja_existia else ledger_mod.OK
+        detalhe = f"{resultado} (ja tinha a tarefa)" if ja_existia else resultado
+        self._anotar(proc, situacao, busca.id_legalone, detalhe)
+        self.contagem[situacao] += 1
+        # Recadastro tambem cria tarefa no Legal One, entao consome a cota do dia.
         self.cadastradas += 1
         if self.executar:
             self.dias_cadastrados.add(datetime.date.today().isoformat())
         logger.info("[%d/%d] %s -> id %s (%s) %r %s",
                     i, total, proc.cnj, busca.id_legalone, busca.status,
-                    perfil.descricao, resultado)
+                    perfil.descricao, detalhe)
 
         if self.max_cadastros and self.cadastradas >= self.max_cadastros:
             self.cota_atingida = True
@@ -576,6 +590,11 @@ def _modo_rodada(args: argparse.Namespace) -> int:
             "--so-buscar nao cadastra nada; nao combine com --executar, senao o "
             "ledger marcaria como feito o que nunca foi cadastrado."
         )
+    if args.pular_existentes and args.rapido:
+        raise ErroDeUso(
+            "--pular-existentes precisa da checagem de duplicata que "
+            "--rapido desliga; escolha uma das duas."
+        )
     if args.so_buscar and args.max_cadastros:
         logger.warning("--max-cadastros nao tem efeito com --so-buscar (nada e "
                        "cadastrado); para encurtar o pre-voo use --limite.")
@@ -624,6 +643,7 @@ def _modo_rodada(args: argparse.Namespace) -> int:
             executar=args.executar,
             so_buscar=args.so_buscar,
             rapido=args.rapido,
+            pular_existentes=args.pular_existentes,
             max_cadastros=args.max_cadastros,
         )
         try:

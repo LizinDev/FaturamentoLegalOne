@@ -75,6 +75,15 @@ def test_so_buscar_com_executar_e_recusado():
         main._modo_rodada(args)
 
 
+def test_pular_existentes_com_rapido_e_recusado():
+    # --rapido desliga a checagem que --pular-existentes precisa para saber o que
+    # pular; juntas, uma das duas nao faria efeito nenhum em silencio.
+    args = main.argumentos(["--planilha", "x.xlsx", "--pular-existentes", "--rapido"])
+
+    with pytest.raises(main.ErroDeUso, match="pular-existentes"):
+        main._modo_rodada(args)
+
+
 def test_data_invalida():
     args = main.argumentos(["--planilha", "x.xlsx", "--data", "2026-07-30"])
 
@@ -175,17 +184,20 @@ def test_rodada_real_pula_o_que_ja_esta_no_ledger(registro, perfil):
     assert pular == {("A", perfil.descricao), ("B", perfil.descricao)}
 
 
-def test_retentar_refaz_erro_e_nao_encontrado(registro, perfil):
+def test_retentar_refaz_tudo_que_nao_cadastramos(registro, perfil):
     registro.registrar("A", perfil.descricao, ledger_mod.OK)
     registro.registrar("B", perfil.descricao, ledger_mod.NAO_ENCONTRADO)
     registro.registrar("C", perfil.descricao, ledger_mod.ERRO)
     registro.registrar("D", perfil.descricao, ledger_mod.JA_EXISTIA)
+    registro.registrar("E", perfil.descricao, ledger_mod.RECADASTRADA)
     args = main.argumentos(["--planilha", "x.xlsx", "--executar", "--retentar"])
 
     _, fila, _ = main._montar_fila(args, registro, perfil,
-                                   _processos("A", "B", "C", "D"))
+                                   _processos("A", "B", "C", "D", "E"))
 
-    assert [p.cnj for p in fila] == ["B", "C"]
+    # D volta para a fila: um 'ja_existia' de rodada antiga e exatamente o caso
+    # que a orientacao atual manda cadastrar. So o que nos cadastramos fica fora.
+    assert [p.cnj for p in fila] == ["B", "C", "D"]
 
 
 def test_simulacao_nao_pula_nada(registro, perfil):
@@ -281,6 +293,28 @@ def test_exportar_finais_gera_a_planilha_do_dia(registro, dados_tmp):
     ws = load_workbook(caminho).active
     assert ws["A2"].value == "A"
     assert ws["B2"].value == 111  # id numerico entra como numero
+    assert not ws["K2"].value     # nao era recadastro
+
+
+def test_planilha_do_dia_marca_o_recadastro(registro, dados_tmp):
+    # O supervisor precisa distinguir o cadastro novo do que ja existia e foi
+    # cadastrado de novo — e filtrar por isso no Excel.
+    registro.con.executemany(
+        "INSERT INTO processos (cnj, tarefa, situacao, id_legalone, quando) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [("A", "FATURAMENTO FINAL", ledger_mod.OK, "111", "2026-07-30T10:00:00"),
+         ("B", "FATURAMENTO FINAL", ledger_mod.RECADASTRADA, "222",
+          "2026-07-30T11:00:00")],
+    )
+    registro.con.commit()
+
+    main._exportar_finais(registro, dias=["2026-07-30"])
+
+    ws = load_workbook(dados_tmp / "cadastrados_2026-07-30.xlsx").active
+    assert ws["K1"].value == "JÁ TINHA A TAREFA"
+    # Celula vazia volta como None do openpyxl.
+    assert [ws["A2"].value, ws["K2"].value] == ["A", None]
+    assert [ws["A3"].value, ws["K3"].value] == ["B", "Sim"]
 
 
 # --- modo relatorio ponta a ponta --------------------------------------------

@@ -167,5 +167,5 @@ def planilha_do_dia(dia: str) -> str:
     return str(DATA_DIR / f"cadastrados_{dia}.xlsx")
 
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 PROJECT_NAME = "Cadastro de tarefas em lote - Legal One"

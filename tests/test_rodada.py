@@ -91,7 +91,8 @@ def test_cadastro_grava_no_ledger_com_os_dados_da_planilha(registro, perfil):
     r.executar_fila([processo()])
 
     assert automador.cadastrados == [("111", True)]
-    assert r.contagem == {"ok": 1, "erro": 0, "nao_encontrado": 0, "ja_existia": 0}
+    assert r.contagem == {"ok": 1, "recadastrada": 0, "erro": 0,
+                          "nao_encontrado": 0, "ja_existia": 0}
     linha = registro.con.execute(
         "SELECT situacao, id_legalone, detalhe, origem, tipo_cobranca, "
         "status_planilha FROM processos WHERE cnj = ?", (CNJ,)
@@ -114,10 +115,25 @@ def test_simulacao_preenche_mas_nao_deixa_rastro(registro, perfil):
     assert r.dias_de_planilha() == []
 
 
-def test_tarefa_que_ja_existia_nao_e_cadastrada_de_novo(registro, perfil):
+def test_tarefa_que_ja_existia_e_cadastrada_de_novo(registro, perfil):
     # Parte dos processos ja tem a tarefa, feita a mao antes de o programa rodar.
+    # A orientacao de operacao para esse caso e cadastrar de novo — a checagem
+    # serve para marcar quais foram, nao para pular.
     automador = AutomadorFalso({CNJ: achou()}, ja_existentes=["111"])
     r = rodada(automador, registro, perfil, executar=True)
+
+    r.executar_fila([processo()])
+
+    assert automador.cadastrados == [("111", True)]
+    assert r.contagem["recadastrada"] == 1
+    assert r.contagem["ja_existia"] == 0
+    assert r.cadastradas == 1  # consome cota: criou tarefa no Legal One
+    assert situacao_de(registro, CNJ, perfil.descricao) == ledger_mod.RECADASTRADA
+
+
+def test_pular_existentes_restaura_o_comportamento_antigo(registro, perfil):
+    automador = AutomadorFalso({CNJ: achou()}, ja_existentes=["111"])
+    r = rodada(automador, registro, perfil, executar=True, pular_existentes=True)
 
     r.executar_fila([processo()])
 
@@ -125,6 +141,19 @@ def test_tarefa_que_ja_existia_nao_e_cadastrada_de_novo(registro, perfil):
     assert r.contagem["ja_existia"] == 1
     assert r.cadastradas == 0  # nao consome cota
     assert situacao_de(registro, CNJ, perfil.descricao) == ledger_mod.JA_EXISTIA
+
+
+def test_recadastro_registra_o_motivo_no_detalhe(registro, perfil):
+    # E o detalhe que explica no relatorio por que ha duas tarefas iguais.
+    automador = AutomadorFalso({CNJ: achou()}, ja_existentes=["111"])
+    r = rodada(automador, registro, perfil, executar=True)
+
+    r.executar_fila([processo()])
+
+    detalhe = registro.con.execute(
+        "SELECT detalhe FROM processos WHERE cnj = ?", (CNJ,)
+    ).fetchone()[0]
+    assert detalhe == "cadastrada (ja tinha a tarefa)"
 
 
 def test_rapido_pula_a_checagem_de_duplicata(registro, perfil):
@@ -268,7 +297,8 @@ def test_um_processo_com_erro_nao_derruba_a_fila(registro, perfil):
     r.executar_fila(fila)
 
     assert automador.buscados == ["A", "B", "C"]
-    assert r.contagem == {"ok": 2, "erro": 1, "nao_encontrado": 0, "ja_existia": 0}
+    assert r.contagem == {"ok": 2, "recadastrada": 0, "erro": 1,
+                          "nao_encontrado": 0, "ja_existia": 0}
     assert situacao_de(registro, "B", perfil.descricao) == ledger_mod.ERRO
     assert r.codigo_saida() == main.SAIDA_OK
 
@@ -358,13 +388,43 @@ def test_cota_do_dia_para_a_rodada(registro, perfil):
     assert r.codigo_saida() == main.SAIDA_OK
 
 
-def test_nao_encontrado_e_ja_existente_nao_consomem_cota(registro, perfil):
+def test_nao_encontrado_nao_consome_cota(registro, perfil):
+    fila = [processo(c) for c in "ABCD"]
+    automador = AutomadorFalso(
+        {"A": achou("1"), "C": achou("3"), "D": achou("4")},  # B nao existe
+    )
+    r = rodada(automador, registro, perfil, executar=True, max_cadastros=2)
+
+    r.executar_fila(fila)
+
+    assert automador.buscados == ["A", "B", "C"]
+    assert r.cadastradas == 2
+
+
+def test_recadastro_consome_cota(registro, perfil):
+    # Ele cria tarefa no Legal One como qualquer outro, entao entra na conta dos
+    # 500 do dia — senao a cota deixaria de limitar o que de fato e cadastrado.
+    fila = [processo(c) for c in "AB"]
+    automador = AutomadorFalso({"A": achou("1"), "B": achou("2")},
+                               ja_existentes=["1", "2"])
+    r = rodada(automador, registro, perfil, executar=True, max_cadastros=1)
+
+    r.executar_fila(fila)
+
+    assert r.contagem["recadastrada"] == 1
+    assert r.cadastradas == 1
+    assert r.cota_atingida is True
+    assert automador.buscados == ["A"]
+
+
+def test_ja_existente_nao_consome_cota_com_pular_existentes(registro, perfil):
     fila = [processo(c) for c in "ABCD"]
     automador = AutomadorFalso(
         {"A": achou("1"), "B": achou("2"), "D": achou("4")},  # C nao existe
         ja_existentes=["2"],
     )
-    r = rodada(automador, registro, perfil, executar=True, max_cadastros=2)
+    r = rodada(automador, registro, perfil, executar=True, max_cadastros=2,
+               pular_existentes=True)
 
     r.executar_fila(fila)
 
@@ -434,13 +494,25 @@ def test_dias_de_planilha_cobre_a_rodada_que_atravessa_a_meia_noite(registro, pe
 
 
 def test_rodada_sem_cadastro_nao_gera_planilha_do_dia(registro, perfil):
-    # Todos ja tinham a tarefa: nao ha planilha do dia para refazer.
+    # Todos ja tinham a tarefa e a rodada foi mandada pular: nada foi cadastrado,
+    # entao nao ha planilha do dia para refazer.
+    automador = AutomadorFalso({CNJ: achou()}, ja_existentes=["111"])
+    r = rodada(automador, registro, perfil, executar=True, pular_existentes=True)
+
+    r.executar_fila([processo()])
+
+    assert r.dias_de_planilha() == []
+
+
+def test_recadastro_gera_planilha_do_dia(registro, perfil):
+    # O recadastro e um cadastro nosso naquele dia: tem que sair na planilha que
+    # vai para o supervisor, marcado como recadastro.
     automador = AutomadorFalso({CNJ: achou()}, ja_existentes=["111"])
     r = rodada(automador, registro, perfil, executar=True)
 
     r.executar_fila([processo()])
 
-    assert r.dias_de_planilha() == []
+    assert r.dias_de_planilha() == [datetime.date.today().isoformat()]
 
 
 def test_resumir_nao_explode_com_a_rodada_vazia(registro, perfil, caplog):

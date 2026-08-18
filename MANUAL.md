@@ -100,12 +100,15 @@ em `data/`.
 Ao fim de cada rodada, o resumo sai no console:
 
 ```
-Resumo desta rodada: {'ok': 500, 'erro': 3, 'nao_encontrado': 166, 'ja_existia': 12}
+Resumo desta rodada: {'ok': 350, 'recadastrada': 150, 'erro': 3, 'nao_encontrado': 166, 'ja_existia': 0}
 Planilha do dia:      ...\data\cadastrados_2026-07-30.xlsx
 ```
 
-`ok` é o que entrou no Legal One naquela rodada — é o número que a planilha do
-dia mostra e o que corresponde à cota.
+`ok` e `recadastrada` somados são o que entrou no Legal One naquela rodada — é o
+que a planilha do dia mostra e o que corresponde à cota. `recadastrada` é o
+processo que já tinha a tarefa e recebeu outra, seguindo a orientação de
+"pode agendar novamente, vamos pecar pelo excesso"; na planilha do dia essas
+linhas vêm marcadas na coluna `JÁ TINHA A TAREFA`.
 
 ---
 
@@ -129,6 +132,7 @@ precisa estar presente**.
 | `--executar` | — | desligada (simula) |
 | `--retentar` | — | desligada |
 | `--rapido` | — | desligada |
+| `--pular-existentes` | — | desligada (por padrão recadastra) |
 | `--so-buscar` | — | desligada |
 | `--relatorio` | — | desligada |
 | `--dia` | `AAAA-MM-DD` | todos os dias com cadastro |
@@ -187,11 +191,12 @@ ainda não vistos, e não os 20 primeiros da planilha.
 
 **`--max-cadastros N`**
 
-Para depois de **cadastrar** N tarefas. Processo não encontrado, processo que já
-tinha a tarefa e processo que deu erro **não consomem cota**.
+Para depois de **cadastrar** N tarefas. Processo não encontrado e processo que
+deu erro **não consomem cota**. Recadastro consome: ele cria tarefa no Legal One
+como qualquer outro (com `--pular-existentes`, o processo é pulado e não conta).
 
 É esta a flag que corresponde à meta combinada: `--max-cadastros 500` são 500
-tarefas novas no Legal One. `--limite 500` seriam 500 processos olhados,
+tarefas criadas no Legal One. `--limite 500` seriam 500 processos olhados,
 resultando em bem menos cadastros (cerca de 1 em 4 da planilha não existe no
 Legal One).
 
@@ -270,8 +275,10 @@ contrário, marcaria como feito algo que nunca foi cadastrado.
 **`--retentar`**
 
 Numa retomada normal, tudo que já está no ledger é pulado. Com `--retentar`, só
-`ok` e `ja_existia` são pulados; `nao_encontrado`, `ambiguo` e `erro` voltam para
-a fila.
+`ok` e `recadastrada` são pulados — o que este programa cadastrou;
+`nao_encontrado`, `ambiguo`, `erro` e `ja_existia` voltam para a fila. Os
+`ja_existia` são de rodadas antigas, quando o programa pulava a tarefa que já
+existia: são exatamente os casos que a orientação atual manda cadastrar.
 
 Útil depois de corrigir a causa de uma leva de erros. Não faz diferença nenhuma
 sem `--executar`, porque a simulação já não pula nada.
@@ -289,15 +296,27 @@ python main.py --planilha "..." --so-buscar
 **Não pode ser combinada com `--executar`** (encerra com código 2). As duas
 juntas marcariam no ledger como resolvido o que nunca foi cadastrado.
 
+**`--pular-existentes`**
+
+Não cadastra onde a tarefa já existe: o processo vira `ja_existia` e a fila
+segue. É o comportamento antigo, hoje sob demanda.
+
+Por padrão o programa **cadastra de novo**, seguindo a orientação de operação
+("pode agendar novamente, vamos pecar pelo excesso"). Nesse caso a situação
+gravada é `recadastrada` e a planilha do dia marca `Sim` na coluna
+`JÁ TINHA A TAREFA` — o excesso vai visível para quem recebe.
+
+Não pode ser combinada com `--rapido` (encerra com código 2): não há como pular
+o que não foi checado.
+
 **`--rapido`**
 
 Pula a checagem de tarefa duplicada, economizando uma página por processo.
 
-> **Cuidado.** Parte dos processos já tem a tarefa cadastrada à mão, antes de o
-> programa rodar — confirmado em produção. A checagem de duplicata é a única
-> coisa que impede o programa de criar uma segunda tarefa igual. `--rapido`
-> desliga exatamente isso. Só use se tiver certeza de que nenhum processo da
-> planilha foi tratado antes.
+> **O que se perde.** Não é o cadastro — com ou sem a flag a tarefa é criada. É a
+> informação: sem a checagem, todo cadastro é gravado como novo (`ok`), e o
+> relatório deixa de distinguir o que já existia. Use quando a velocidade
+> importar mais do que essa distinção.
 
 ### Relatórios
 
@@ -332,7 +351,7 @@ parece pegar processos "do meio" da planilha.
    `--status-planilha`.
 2. **Deduplicação por número CNJ.** O mesmo processo repetido em várias linhas ou
    abas vira uma entrada só, com as origens agregadas.
-3. **Remoção do que já está no ledger** — tudo, ou só `ok` e `ja_existia` se
+3. **Remoção do que já está no ledger** — tudo, ou só `ok` e `recadastrada` se
    `--retentar`. Numa simulação, nada é removido.
 4. **`--processo`**, se usada: mantém só os números pedidos e desfaz o passo 3.
 5. **`--limite`**: corta a fila resultante.
@@ -343,6 +362,7 @@ Combinações que o programa recusa:
 | Combinação | O que acontece |
 | --- | --- |
 | `--so-buscar --executar` | Encerra com código 2 |
+| `--pular-existentes --rapido` | Encerra com código 2 |
 | nem `--planilha` nem `--relatorio` | Encerra com código 2 |
 | planilha sem o trecho exigido pelo `--tarefa` | Encerra com código 2 (salvo `--forcar-planilha`) |
 
@@ -506,7 +526,7 @@ A cada 25 processos sai uma linha de progresso com ritmo, tempo decorrido, ETA e
 o placar:
 
 ```
-... 250/11954 | 9.6s/processo | decorrido 0h40m | falta ~31h12m | {'ok': 187, 'erro': 2, 'nao_encontrado': 61, 'ja_existia': 0}
+... 250/11954 | 9.6s/processo | decorrido 0h40m | falta ~31h12m | {'ok': 130, 'recadastrada': 57, 'erro': 2, 'nao_encontrado': 61, 'ja_existia': 0}
 ```
 
 ---

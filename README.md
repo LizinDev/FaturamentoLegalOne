@@ -69,22 +69,40 @@ a referência completa das flags estão no
 **[Manual de operação](MANUAL.md)**. Para mexer no código, veja
 [Desenvolvimento](#desenvolvimento).
 
-## Aviso sobre `--rapido`
-
-A flag `--rapido` pula a checagem de tarefa duplicada, economizando uma página
-por processo. O ganho é real e a armadilha também.
+## Quando a tarefa já existe
 
 Parte dos processos **já tem a tarefa cadastrada antes de o programa rodar**,
 feita à mão. Confirmado em produção: o processo `0088829-65.2025.8.05.0001` já
-tinha uma `DEFESA FATURADA` marcada como Cumprido.
+tinha uma `DEFESA FATURADA` marcada como Cumprido, e numa conferência da aba
+`2019-2020-2021` isso valeu para 5 de 10 processos sorteados.
 
-Ou seja, a checagem de duplicata não é só uma rede de segurança contra perda do
-ledger — ela é a única coisa que impede o programa de duplicar tarefa que já
-existe. `--rapido` desliga exatamente isso. Use só se tiver certeza de que
-nenhum processo da planilha já foi tratado.
+A orientação de operação para esse caso é **"pode agendar novamente, vamos pecar
+pelo excesso"**. Então o programa cadastra de novo, e a checagem de duplicata
+deixou de decidir *se* cadastra: ela decide *o que registrar*. O processo entra
+no ledger como `recadastrada` e sai marcado na planilha do dia, na coluna
+`JÁ TINHA A TAREFA`. Sem isso o supervisor receberia o excesso sem saber que é
+excesso.
 
-Quando a tarefa já existe, o processo é contado como `ja_existia` e **não
-consome cota** de `--max-cadastros` — 500 continuam sendo 500 cadastros novos.
+`--pular-existentes` restaura o comportamento antigo (registra `ja_existia` e não
+cadastra), para o dia em que a orientação mudar.
+
+Duas consequências disso:
+
+- **Recadastro consome cota.** Ele cria uma tarefa no Legal One como qualquer
+  outro, então entra na conta de `--max-cadastros`. 500 por dia passa a incluir
+  as repetidas.
+- **`--retentar` devolve os `ja_existia` antigos para a fila.** São exatamente os
+  casos que a orientação atual manda cadastrar. Registros `ok` e `recadastrada` —
+  o que este programa cadastrou — continuam fora.
+
+### Aviso sobre `--rapido`
+
+A flag `--rapido` pula a checagem, economizando uma página por processo. Ela já
+não muda o que é cadastrado (com ou sem ela a tarefa é criada); o que se perde é
+a **informação**: sem a checagem, todo cadastro sai como novo e o relatório deixa
+de distinguir o que era repetido. Use quando a velocidade importar mais do que
+essa distinção. Combinar `--rapido` com `--pular-existentes` é recusado com
+código 2 — não dá para pular o que não foi checado.
 
 ## Retomada
 
@@ -106,19 +124,22 @@ Situações registradas no ledger:
 | Situação | Significado |
 | --- | --- |
 | `ok` | Tarefa cadastrada |
-| `ja_existia` | O processo já tinha a tarefa daquele perfil |
+| `recadastrada` | O processo já tinha a tarefa e ela foi cadastrada de novo |
+| `ja_existia` | O processo já tinha a tarefa e foi pulado (`--pular-existentes`) |
 | `nao_encontrado` | Nenhuma pasta com esse número exato no Legal One |
 | `ambiguo` | Mais de uma pasta do tipo Processo com o mesmo número |
 | `erro` | Falha no meio do caminho (o motivo fica na coluna `DETALHE`) |
 
-Numa retomada normal tudo que já está no ledger é pulado. Com `--retentar`,
-só `ok` e `ja_existia` são pulados — o resto é tentado outra vez.
+Numa retomada normal tudo que já está no ledger é pulado. Com `--retentar`, só
+`ok` e `recadastrada` são pulados — o que este programa cadastrou. O resto,
+inclusive `ja_existia`, é tentado outra vez.
 
 Uma **simulação nunca escreve no ledger**, para não marcar como feito algo que
 não foi cadastrado.
 
-Um `ok` nunca é rebaixado para `ja_existia`. Reprocessar um processo já
-cadastrado responde "já tinha a tarefa", e isso é verdade daquela passada — mas
+Um cadastro nosso (`ok` ou `recadastrada`) nunca é rebaixado para `ja_existia`.
+Reprocessar um processo já cadastrado responde "já tinha a tarefa", e isso é
+verdade daquela passada — mas
 sobrescrever apagaria o registro de que fomos nós que cadastramos, e em que dia.
 Como a planilha diária se apoia nisso, a situação, a data e o detalhe originais
 são preservados.
@@ -153,8 +174,8 @@ processo e recria, sem perder a rodada.
 redirecionar para o login, e aí a busca passa a não achar nada. Depois de 25
 seguidos o programa para, descarta esses registros suspeitos do ledger e avisa.
 É o caso mais perigoso de uma rodada sem supervisão, porque falha parecendo
-sucesso. O descarte só alcança registros pendentes: `ok` e `ja_existia` são
-trabalho confirmado no Legal One e nunca são apagados.
+sucesso. O descarte só alcança registros pendentes: `ok`, `recadastrada` e
+`ja_existia` são trabalho confirmado no Legal One e nunca são apagados.
 
 **`Ctrl+C`** — encerra limpo, exporta os relatórios e mantém o progresso.
 
@@ -204,7 +225,8 @@ automaticamente ao fim de toda rodada real que tenha cadastrado alguma coisa.
 Traz só os processos que *esta instalação cadastrou naquele dia*, com cabeçalho
 formatado, painel congelado e autofiltro. Colunas: processo, id no Legal One, os
 quatro valores da tarefa (descrição, status, tipo, responsável), tipo de
-cobrança, status na planilha, origem e o horário do cadastro.
+cobrança, status na planilha, origem, o horário do cadastro e
+`JÁ TINHA A TAREFA` (`Sim` nos recadastros, vazio nos demais).
 
 Uma rodada que atravessa a meia-noite gera **as duas** planilhas, cada uma só com
 o que foi cadastrado naquele dia. Se as duas tarefas rodarem no mesmo dia, as
@@ -336,7 +358,11 @@ Para os ~12 mil processos únicos da planilha, o fluxo completo fica na casa das
 
 ## Versão
 
-**1.4.0** — `--tarefa auto`: a tarefa de cada processo sai da coluna `TIPO DE
+**1.5.0** — tarefa que já existe passa a ser cadastrada de novo, seguindo a
+orientação de operação; a situação `recadastrada` e a coluna `JÁ TINHA A TAREFA`
+marcam o excesso, e `--pular-existentes` guarda o comportamento antigo.
+
+1.4.0 — `--tarefa auto`: a tarefa de cada processo sai da coluna `TIPO DE
 COBRANÇA`, para a planilha que mistura as duas na mesma aba. Com ele, a
 deduplicação e o controle de "já feito" passam a ser por (processo, tarefa).
 

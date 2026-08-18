@@ -24,12 +24,25 @@ NAO_ENCONTRADO = "nao_encontrado"
 AMBIGUO = "ambiguo"
 ERRO = "erro"
 JA_EXISTIA = "ja_existia"
+# A tarefa ja estava la e foi cadastrada de novo: a orientacao de operacao para
+# esse caso e "pode agendar novamente, vamos pecar pelo excesso". Fica numa
+# situacao propria, e nao junto com 'ok', para o relatorio distinguir o excesso.
+RECADASTRADA = "recadastrada"
 
-# Situacoes que nao devem ser refeitas numa retomada normal.
-CONCLUIDAS = {OK, JA_EXISTIA}
+# Tarefas que este programa criou no Legal One. Uma retomada com --retentar pula
+# so estas: um 'ja_existia' de rodada antiga e justamente um caso que a
+# orientacao atual manda cadastrar, entao ele volta para a fila.
+NOSSOS_CADASTROS = {OK, RECADASTRADA}
+
+# Trabalho confirmado no Legal One, que o disjuntor nunca pode apagar.
+CONCLUIDAS = {OK, RECADASTRADA, JA_EXISTIA}
 
 # Situacoes que pedem conferencia manual na planilha.
 PENDENTES_ATENCAO = (NAO_ENCONTRADO, AMBIGUO)
+
+# As mesmas situacoes escritas para dentro do SQL de registrar(), onde nao da
+# para usar parametro: elas aparecem num CASE, e nao numa comparacao de valor.
+_SQL_NOSSOS_CADASTROS = ", ".join(f"'{s}'" for s in sorted(NOSSOS_CADASTROS))
 
 ESQUEMA_TABELA = """
 CREATE TABLE IF NOT EXISTS processos (
@@ -149,7 +162,8 @@ class Ledger:
         # 1. Reprocessar um processo ja cadastrado devolve "ja_existia" — que e
         #    verdade daquela passada, mas apagaria o registro de que fomos nos
         #    que cadastramos, e em que dia. Como o relatorio diario se apoia
-        #    nisso, um 'ok' nunca e rebaixado: mantem situacao, data e detalhe.
+        #    nisso, um cadastro nosso ('ok' ou 'recadastrada') nunca e
+        #    rebaixado: mantem situacao, data e detalhe.
         # 2. Nem todo caminho tem todos os dados em maos (um erro no meio do
         #    cadastro nao sabe o tipo de cobranca, por exemplo). Valor vazio
         #    nunca sobrescreve valor preenchido, senao a segunda passada
@@ -160,14 +174,14 @@ class Ledger:
             "   tipo_cobranca, status_planilha, cnj_original, quando) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(cnj, tarefa) DO UPDATE SET "
-            "  situacao = CASE WHEN processos.situacao = 'ok' "
-            "                   AND excluded.situacao = 'ja_existia' "
+            f"  situacao = CASE WHEN processos.situacao IN ({_SQL_NOSSOS_CADASTROS}) "
+            f"                   AND excluded.situacao = '{JA_EXISTIA}' "
             "                  THEN processos.situacao ELSE excluded.situacao END, "
-            "  quando   = CASE WHEN processos.situacao = 'ok' "
-            "                   AND excluded.situacao = 'ja_existia' "
+            f"  quando   = CASE WHEN processos.situacao IN ({_SQL_NOSSOS_CADASTROS}) "
+            f"                   AND excluded.situacao = '{JA_EXISTIA}' "
             "                  THEN processos.quando ELSE excluded.quando END, "
-            "  detalhe  = CASE WHEN processos.situacao = 'ok' "
-            "                   AND excluded.situacao = 'ja_existia' "
+            f"  detalhe  = CASE WHEN processos.situacao IN ({_SQL_NOSSOS_CADASTROS}) "
+            f"                   AND excluded.situacao = '{JA_EXISTIA}' "
             "                  THEN processos.detalhe ELSE excluded.detalhe END, "
             "  id_legalone     = COALESCE(NULLIF(excluded.id_legalone, ''), "
             "                             processos.id_legalone), "
@@ -186,12 +200,13 @@ class Ledger:
         self.con.commit()
 
     def concluidos(self, tarefa: str) -> set[str]:
-        marcas = ",".join("?" * len(CONCLUIDAS))
+        """O que --retentar pula: as tarefas que nos cadastramos."""
+        marcas = ",".join("?" * len(NOSSOS_CADASTROS))
         return {
             r[0] for r in self.con.execute(
                 f"SELECT cnj FROM processos "
                 f"WHERE tarefa = ? AND situacao IN ({marcas})",
-                (tarefa, *CONCLUIDAS),
+                (tarefa, *NOSSOS_CADASTROS),
             )
         }
 
@@ -209,7 +224,7 @@ class Ledger:
         uma queda de sessao sao falsos, e deixa-los gravados faria a retomada
         pular justamente os processos que nunca foram avaliados de verdade.
 
-        So apaga o que ainda esta pendente. Um 'ok' ou 'ja_existia' e trabalho
+        So apaga o que ainda esta pendente. Uma situacao de CONCLUIDAS e trabalho
         confirmado no Legal One: apagar por engano faria a retomada cadastrar a
         mesma tarefa de novo. Devolve quantos registros sairam de fato.
         """
@@ -227,21 +242,28 @@ class Ledger:
         return apagados
 
     def cadastrados_em(self, dia: str) -> list[tuple]:
-        """Cadastros feitos por nos num dia (dia no formato AAAA-MM-DD)."""
+        """Cadastros feitos por nos num dia (dia no formato AAAA-MM-DD).
+
+        Inclui os recadastros: eles tambem criaram tarefa naquele dia, e a
+        planilha do supervisor precisa mostra-los — marcados como tal.
+        """
+        marcas = ",".join("?" * len(NOSSOS_CADASTROS))
         return self.con.execute(
-            "SELECT cnj, tarefa, id_legalone, tipo_cobranca, status_planilha, "
-            "       origem, quando "
-            "FROM processos WHERE situacao = ? AND quando LIKE ? "
-            "ORDER BY tarefa, quando",
-            (OK, f"{dia}%"),
+            f"SELECT cnj, tarefa, id_legalone, tipo_cobranca, status_planilha, "
+            f"       origem, quando, situacao "
+            f"FROM processos WHERE situacao IN ({marcas}) AND quando LIKE ? "
+            f"ORDER BY tarefa, quando",
+            (*NOSSOS_CADASTROS, f"{dia}%"),
         ).fetchall()
 
     def dias_com_cadastro(self) -> list[str]:
         """Dias com pelo menos um cadastro, do mais recente para o mais antigo."""
+        marcas = ",".join("?" * len(NOSSOS_CADASTROS))
         return [
             r[0] for r in self.con.execute(
-                "SELECT DISTINCT substr(quando, 1, 10) FROM processos "
-                "WHERE situacao = ? ORDER BY 1 DESC", (OK,)
+                f"SELECT DISTINCT substr(quando, 1, 10) FROM processos "
+                f"WHERE situacao IN ({marcas}) ORDER BY 1 DESC",
+                (*NOSSOS_CADASTROS,)
             )
         ]
 

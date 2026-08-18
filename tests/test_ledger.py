@@ -83,6 +83,21 @@ def test_ja_existia_grava_normalmente_quando_nao_havia_ok(registro):
     assert situacao_de(registro, CNJ, FATURAMENTO) == ledger_mod.JA_EXISTIA
 
 
+def test_recadastrada_tambem_nao_e_rebaixada_para_ja_existia(registro):
+    # Recadastrar e cadastro nosso como qualquer outro: a data e o detalhe
+    # precisam sobreviver a uma passada posterior que so olhou e viu que existe.
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.RECADASTRADA, "111",
+                       "cadastrada (ja tinha a tarefa)")
+
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.JA_EXISTIA, "111", "ja tinha")
+
+    situacao, detalhe = registro.con.execute(
+        "SELECT situacao, detalhe FROM processos WHERE cnj = ?", (CNJ,)
+    ).fetchone()
+    assert (situacao, detalhe) == (ledger_mod.RECADASTRADA,
+                                   "cadastrada (ja tinha a tarefa)")
+
+
 # --- filas -------------------------------------------------------------------
 
 def test_concluidos_e_todos_separam_o_que_se_retenta(registro):
@@ -91,9 +106,13 @@ def test_concluidos_e_todos_separam_o_que_se_retenta(registro):
     registro.registrar("C", FATURAMENTO, ledger_mod.ERRO)
     registro.registrar("D", FATURAMENTO, ledger_mod.NAO_ENCONTRADO)
     registro.registrar("E", DEFESA, ledger_mod.OK)
+    registro.registrar("F", FATURAMENTO, ledger_mod.RECADASTRADA)
 
-    assert registro.concluidos(FATURAMENTO) == {"A", "B"}
-    assert registro.todos(FATURAMENTO) == {"A", "B", "C", "D"}
+    # 'ja_existia' NAO entra: a orientacao e cadastrar de novo onde a tarefa ja
+    # existe, entao um 'ja_existia' de rodada antiga volta para a fila com
+    # --retentar. So o que nos cadastramos e que fica de fora.
+    assert registro.concluidos(FATURAMENTO) == {"A", "F"}
+    assert registro.todos(FATURAMENTO) == {"A", "B", "C", "D", "F"}
     assert registro.concluidos(DEFESA) == {"E"}
 
 
@@ -108,15 +127,16 @@ def test_esquecer_apaga_so_a_tarefa_indicada(registro):
 
 
 def test_esquecer_nunca_apaga_trabalho_confirmado(registro):
-    # 'ok' e 'ja_existia' sao tarefas que existem no Legal One: apagar por
-    # engano faria a retomada cadastrar a mesma tarefa de novo.
+    # 'ok', 'recadastrada' e 'ja_existia' sao tarefas que existem no Legal One:
+    # apagar por engano faria a retomada cadastrar a mesma tarefa de novo.
     registro.registrar("A", FATURAMENTO, ledger_mod.OK)
     registro.registrar("B", FATURAMENTO, ledger_mod.JA_EXISTIA)
     registro.registrar("C", FATURAMENTO, ledger_mod.NAO_ENCONTRADO)
+    registro.registrar("D", FATURAMENTO, ledger_mod.RECADASTRADA)
 
-    assert registro.esquecer(["A", "B", "C"], FATURAMENTO) == 1
+    assert registro.esquecer(["A", "B", "C", "D"], FATURAMENTO) == 1
 
-    assert registro.todos(FATURAMENTO) == {"A", "B"}
+    assert registro.todos(FATURAMENTO) == {"A", "B", "D"}
 
 
 def test_esquecer_lista_vazia(registro):
@@ -132,11 +152,17 @@ def test_cadastrados_em_filtra_por_dia_e_situacao(registro):
             ("A", FATURAMENTO, ledger_mod.OK, "2026-07-30T10:00:00"),
             ("B", FATURAMENTO, ledger_mod.OK, "2026-07-31T10:00:00"),
             ("C", FATURAMENTO, ledger_mod.JA_EXISTIA, "2026-07-30T11:00:00"),
+            # Recadastro tambem criou tarefa naquele dia: entra na planilha.
+            ("D", FATURAMENTO, ledger_mod.RECADASTRADA, "2026-07-30T12:00:00"),
         ],
     )
     registro.con.commit()
 
-    assert [linha[0] for linha in registro.cadastrados_em("2026-07-30")] == ["A"]
+    linhas = registro.cadastrados_em("2026-07-30")
+    assert [linha[0] for linha in linhas] == ["A", "D"]
+    # A situacao vai junto: e o que marca a coluna "JA TINHA A TAREFA".
+    assert [linha[-1] for linha in linhas] == [ledger_mod.OK,
+                                               ledger_mod.RECADASTRADA]
     assert registro.dias_com_cadastro() == ["2026-07-31", "2026-07-30"]
 
 
