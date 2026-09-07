@@ -44,6 +44,17 @@ PENDENTES_ATENCAO = (NAO_ENCONTRADO, AMBIGUO)
 # para usar parametro: elas aparecem num CASE, e nao numa comparacao de valor.
 _SQL_NOSSOS_CADASTROS = ", ".join(f"'{s}'" for s in sorted(NOSSOS_CADASTROS))
 
+# A trava de rebaixamento de registrar(): um cadastro nosso ja confirmado no
+# Legal One so pode ser reescrito por outro cadastro nosso. Qualquer outra
+# observacao posterior — 'ja_existia', mas tambem 'nao_encontrado', 'ambiguo' e
+# 'erro' — nao desfaz a tarefa que ja foi criada, entao nao pode apagar o
+# registro dela. Rebaixado, o par sairia de NOSSOS_CADASTROS e de CONCLUIDAS:
+# --retentar o cadastraria de novo e esquecer() poderia apaga-lo do ledger.
+_SQL_NAO_REBAIXAR = (
+    f"processos.situacao IN ({_SQL_NOSSOS_CADASTROS}) "
+    f"AND excluded.situacao NOT IN ({_SQL_NOSSOS_CADASTROS})"
+)
+
 ESQUEMA_TABELA = """
 CREATE TABLE IF NOT EXISTS processos (
     cnj             TEXT NOT NULL,
@@ -163,7 +174,9 @@ class Ledger:
         #    verdade daquela passada, mas apagaria o registro de que fomos nos
         #    que cadastramos, e em que dia. Como o relatorio diario se apoia
         #    nisso, um cadastro nosso ('ok' ou 'recadastrada') nunca e
-        #    rebaixado: mantem situacao, data e detalhe.
+        #    rebaixado: mantem situacao, data e detalhe. Vale para qualquer
+        #    situacao que nao seja outro cadastro nosso — uma busca que falha
+        #    depois nao desfaz a tarefa criada. Ver _SQL_NAO_REBAIXAR.
         # 2. Nem todo caminho tem todos os dados em maos (um erro no meio do
         #    cadastro nao sabe o tipo de cobranca, por exemplo). Valor vazio
         #    nunca sobrescreve valor preenchido, senao a segunda passada
@@ -174,14 +187,11 @@ class Ledger:
             "   tipo_cobranca, status_planilha, cnj_original, quando) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(cnj, tarefa) DO UPDATE SET "
-            f"  situacao = CASE WHEN processos.situacao IN ({_SQL_NOSSOS_CADASTROS}) "
-            f"                   AND excluded.situacao = '{JA_EXISTIA}' "
+            f"  situacao = CASE WHEN {_SQL_NAO_REBAIXAR} "
             "                  THEN processos.situacao ELSE excluded.situacao END, "
-            f"  quando   = CASE WHEN processos.situacao IN ({_SQL_NOSSOS_CADASTROS}) "
-            f"                   AND excluded.situacao = '{JA_EXISTIA}' "
+            f"  quando   = CASE WHEN {_SQL_NAO_REBAIXAR} "
             "                  THEN processos.quando ELSE excluded.quando END, "
-            f"  detalhe  = CASE WHEN processos.situacao IN ({_SQL_NOSSOS_CADASTROS}) "
-            f"                   AND excluded.situacao = '{JA_EXISTIA}' "
+            f"  detalhe  = CASE WHEN {_SQL_NAO_REBAIXAR} "
             "                  THEN processos.detalhe ELSE excluded.detalhe END, "
             "  id_legalone     = COALESCE(NULLIF(excluded.id_legalone, ''), "
             "                             processos.id_legalone), "

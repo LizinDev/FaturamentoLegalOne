@@ -98,6 +98,49 @@ def test_recadastrada_tambem_nao_e_rebaixada_para_ja_existia(registro):
                                    "cadastrada (ja tinha a tarefa)")
 
 
+@pytest.mark.parametrize("depois", [
+    ledger_mod.NAO_ENCONTRADO, ledger_mod.AMBIGUO, ledger_mod.ERRO,
+])
+@pytest.mark.parametrize("antes", [ledger_mod.OK, ledger_mod.RECADASTRADA])
+def test_cadastro_nosso_nao_e_rebaixado_por_passada_que_falhou(
+    registro, antes, depois
+):
+    # Uma segunda passada sobre um par ja cadastrado (--processo zera a lista de
+    # pulados, e --retentar refaz 'ja_existia') pode falhar na busca por motivo
+    # passageiro. Isso nao desfaz a tarefa criada no Legal One: se a situacao
+    # fosse rebaixada, o par sairia de NOSSOS_CADASTROS e de CONCLUIDAS, sumiria
+    # da planilha do dia, voltaria para a fila do --retentar (tarefa duplicada)
+    # e o disjuntor ainda poderia apaga-lo do ledger com esquecer().
+    registro.registrar(CNJ, FATURAMENTO, antes, "111", "cadastrada")
+    quando = registro.con.execute(
+        "SELECT quando FROM processos WHERE cnj = ?", (CNJ,)
+    ).fetchone()[0]
+
+    registro.registrar(CNJ, FATURAMENTO, depois, detalhe="falha passageira")
+
+    situacao, detalhe, agora = registro.con.execute(
+        "SELECT situacao, detalhe, quando FROM processos WHERE cnj = ?", (CNJ,)
+    ).fetchone()
+    assert (situacao, detalhe, agora) == (antes, "cadastrada", quando)
+    assert registro.concluidos(FATURAMENTO) == {CNJ}
+    assert registro.esquecer([CNJ], FATURAMENTO) == 0
+
+
+def test_cadastro_nosso_ainda_e_atualizado_por_outro_cadastro_nosso(registro):
+    # A trava e so contra rebaixamento: um recadastro de verdade cria tarefa
+    # nova no Legal One e precisa atualizar situacao, data e detalhe.
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.OK, "111", "cadastrada")
+
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.RECADASTRADA, "111",
+                       "cadastrada (ja tinha a tarefa)")
+
+    situacao, detalhe = registro.con.execute(
+        "SELECT situacao, detalhe FROM processos WHERE cnj = ?", (CNJ,)
+    ).fetchone()
+    assert (situacao, detalhe) == (ledger_mod.RECADASTRADA,
+                                   "cadastrada (ja tinha a tarefa)")
+
+
 # --- filas -------------------------------------------------------------------
 
 def test_concluidos_e_todos_separam_o_que_se_retenta(registro):
