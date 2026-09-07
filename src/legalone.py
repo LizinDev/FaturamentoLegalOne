@@ -153,7 +153,13 @@ class AutomadorLegalOne:
                 if self.driver.execute_script("return window.name;") == self.MARCA_ABA:
                     self._aba = handle
                     return
-            except Exception:
+            except Exception as e:
+                # Aba fechada entre o window_handles e o switch_to, ou que nao
+                # aceita script. Nao e motivo para parar — a busca continua e,
+                # se nenhuma servir, abre-se uma aba nova logo abaixo. Fica em
+                # debug so para nao esconder um Chrome caindo aos pedacos.
+                logger.debug("Aba %s ignorada na procura: %s: %s",
+                             handle, type(e).__name__, e)
                 continue
 
         self.driver.switch_to.new_window("tab")
