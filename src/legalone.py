@@ -213,7 +213,8 @@ class AutomadorLegalOne:
         # resultado" para um processo que existe. Linha sem link de processo e
         # descartada, entao varrer a mais nao inventa candidato.
         # O Set evita contar duas vezes a mesma linha quando ha tabela aninhada.
-        linhas = self.driver.execute_script("""
+        resultado = self.driver.execute_script("""
+        const sentinela = !!document.querySelector('#Search');
         const vistas = new Set();
         const linhas = [];
         for (const tabela of document.querySelectorAll('table')) {
@@ -230,10 +231,15 @@ class AutomadorLegalOne:
             });
           }
         }
-        return linhas;
+        return {sentinela: sentinela, linhas: linhas};
         """)
 
-        return interpretar_busca(linhas, cnj)
+        if not resultado["sentinela"]:
+            raise RuntimeError(
+                "a pagina de busca de processos nao carregou como esperado; "
+                "nao da para afirmar que o processo nao existe"
+            )
+        return interpretar_busca(resultado["linhas"], cnj)
 
     def tarefa_ja_existe(self, id_legalone: str, descricao: str) -> bool:
         """Diz se o processo ja tem uma tarefa com essa descricao.
