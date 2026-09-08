@@ -238,6 +238,9 @@ class Rodada:
         # na fila com as duas tarefas, e so uma delas pode ser suspeita.
         self.trilha_sem_achar: list[tuple[str, str]] = []
         self.disjuntor = False
+        self.disjuntor_nao_encontrados = False
+        self.disjuntor_erros = False
+        self.erros_seguidos = 0
         self.cota_atingida = False
         self.interrompida = False
         self.sessao_expirada: legalone.SessaoExpirada | None = None
@@ -255,6 +258,7 @@ class Rodada:
                 try:
                     if not self._um_processo(proc, i, total):
                         break
+                    self.erros_seguidos = 0
                 except legalone.SessaoExpirada:
                     raise
                 except Exception as e:
@@ -270,6 +274,18 @@ class Rodada:
                     self.contagem["erro"] += 1
                     logger.error("[%d/%d] %s — ERRO: %s: %s",
                                  i, total, proc.cnj, type(e).__name__, e)
+                    self.erros_seguidos += 1
+                    self.trilha_sem_achar.clear()
+                    if self.erros_seguidos >= config.MAX_ERROS_SEGUIDOS:
+                        self.disjuntor = True
+                        self.disjuntor_erros = True
+                        logger.error(
+                            "PARADO: %d falhas consecutivas. O Chrome ou o "
+                            "Legal One pode estar fora do ar; confira a "
+                            "conexao e rode novamente com --retentar.",
+                            config.MAX_ERROS_SEGUIDOS,
+                        )
+                        break
                 finally:
                     # Progresso e pausa valem para todo processo, inclusive os
                     # que sairam cedo — senao o ETA some justo nas rodadas
@@ -288,7 +304,7 @@ class Rodada:
             logger.info("Cota do dia atingida: %d tarefa(s) cadastrada(s). "
                         "O restante da fila fica para a proxima rodada.",
                         self.cadastradas)
-        if self.disjuntor:
+        if self.disjuntor_nao_encontrados:
             self._descartar_suspeitos()
 
     def _perfil_de(self, proc: planilha.Processo) -> config.PerfilTarefa:
@@ -382,6 +398,7 @@ class Rodada:
 
         if len(self.trilha_sem_achar) >= config.MAX_NAO_ENCONTRADOS_SEGUIDOS:
             self.disjuntor = True
+            self.disjuntor_nao_encontrados = True
             return False
         return True
 

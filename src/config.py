@@ -148,6 +148,9 @@ PAUSA_ENTRE_PROCESSOS = 0.5
 # da noite marcaria milhares de processos como inexistentes — e eles seriam
 # pulados na retomada.
 MAX_NAO_ENCONTRADOS_SEGUIDOS = 25
+# Falhas de automacao em sequencia quase sempre significam que o Chrome ou a
+# sessao deixaram de responder; continuar so transforma a fila inteira em erro.
+MAX_ERROS_SEGUIDOS = 3
 DEBUG_PORT = int(os.environ.get("DEBUG_PORT", "9222"))
 DEBUG_ADDRESS = f"localhost:{DEBUG_PORT}"
 
