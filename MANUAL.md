@@ -250,6 +250,12 @@ python main.py --planilha "..\Planilha de Faturamento.xlsx" --abas "2019-2020-20
 Data de início e fim da tarefa. Sem ela, hoje. Data mal formada ou inexistente
 (`31/02/2026`) encerra com código 2 antes de abrir o Chrome.
 
+Sem `--data`, "hoje" é recalculado a cada tarefa cadastrada, não fixado no
+início da rodada. Numa rodada que atravessa a meia-noite, as tarefas cadastradas
+antes da virada levam a data de ontem e as de depois levam a de hoje, na mesma
+execução. Use `--data` quando precisar que a rodada inteira registre uma data
+fixa.
+
 **`--forcar-planilha`**
 
 Desliga a trava que confere se a planilha combina com o `--tarefa` escolhido.
@@ -501,6 +507,14 @@ descarta esses registros suspeitos do ledger (só os pendentes — trabalho
 confirmado nunca é apagado) e eles voltam para a fila. Confira o Chrome, refaça o
 login e repita o comando.
 
+### "PARADO: 3 falhas consecutivas" (código 1)
+
+O segundo disjuntor. Timeout, elemento que não apareceu e outras falhas de
+automação viram `erro` e podem ocorrer isoladamente, mas três `erro` seguidos
+fazem a rodada parar. Confira o Chrome e o Legal One; depois rode novamente com
+`--retentar`. Este disjuntor não descarta registros do ledger: os erros ficam
+salvos para a nova tentativa.
+
 ### `erro` subindo rápido no placar
 
 Sinal de que algo mudou no Legal One. Vale parar e olhar `logs/faturamento.log`:
@@ -542,6 +556,7 @@ mudar de comportamento.
 | `DEBOUNCE_DELAY` | `0.4` | Pausa antes do ENTER no lookup de envolvido |
 | `PAUSA_ENTRE_PROCESSOS` | `0.5` | Respiro entre um processo e o próximo |
 | `MAX_NAO_ENCONTRADOS_SEGUIDOS` | `25` | Quantos "não encontrado" seguidos disparam o disjuntor |
+| `MAX_ERROS_SEGUIDOS` | `3` | Quantos `erro` seguidos param a rodada |
 | `PASSO_PROGRESSO` | `25` | De quantos em quantos processos sai a linha de progresso (em `src/main.py`) |
 | `TIPO_ACEITO` | `"Processo"` | Só cadastra em pasta deste tipo (recurso e incidente repetem o CNJ) |
 
