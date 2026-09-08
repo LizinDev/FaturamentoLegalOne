@@ -152,13 +152,21 @@ colunas que a primeira tinha preenchido.
 ## Como os erros são tratados
 
 A regra geral: **um processo com problema nunca derruba a fila.** A falha é
-registrada com o motivo e o programa segue para o próximo. Só duas situações
-param tudo, e as duas de propósito.
+registrada com o motivo e o programa segue para o próximo. Três situações param
+tudo, e todas de propósito.
 
 **Falha isolada** (timeout, elemento que não apareceu, tipo padrão diferente do
 esperado) — vira `erro` no ledger com a exceção e a mensagem em `DETALHE`, e a
 rodada continua. Numa retomada normal esses são pulados; com `--retentar` são
 tentados de novo.
+
+**Três falhas comuns consecutivas** — o segundo disjuntor. Se resultados
+`erro` (por exemplo, timeout ou elemento ausente) se repetirem **3 vezes
+seguidas** (`MAX_ERROS_SEGUIDOS`), a rodada para com código 1 e registra
+`PARADO: 3 falhas consecutivas`. Confira o Chrome e o Legal One e rode de novo
+com `--retentar`. Diferentemente do disjuntor de "não encontrado", este não
+descarta nada do ledger: os `erro` ficam registrados para serem tentados de
+novo.
 
 **Processo não encontrado** — vira `nao_encontrado` e vai para
 `nao_encontrados.csv` com o motivo. Não é erro: parte da planilha simplesmente
@@ -230,7 +238,10 @@ cobrança, status na planilha, origem, o horário do cadastro e
 
 Uma rodada que atravessa a meia-noite gera **as duas** planilhas, cada uma só com
 o que foi cadastrado naquele dia. Se as duas tarefas rodarem no mesmo dia, as
-duas aparecem no mesmo arquivo, separadas pela coluna `TAREFA`.
+duas aparecem no mesmo arquivo, separadas pela coluna `TAREFA`. Sem `--data`, a
+data gravada na tarefa também é recalculada a cada cadastro: tarefas antes da
+virada recebem a data de ontem e as de depois, a de hoje. Use `--data` para
+fixar a mesma data na rodada inteira.
 
 Os valores fixos da tarefa são repetidos em toda linha de propósito: assim a
 planilha se explica sozinha para quem recebe e não acompanhou a execução.
