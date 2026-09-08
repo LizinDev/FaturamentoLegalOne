@@ -328,6 +328,13 @@ class Rodada:
                         i, total, proc.cnj, perfil.descricao)
             return True
 
+        # O cadastro no Legal One e a gravacao local nao formam uma transacao:
+        # se o usuario der Ctrl+C depois do clique e antes do retorno, o
+        # processo precisa continuar visivel no ledger para ser retomado com
+        # --retentar, em vez de desaparecer da fila como se nada tivesse sido
+        # tentado.
+        self._anotar(proc, ledger_mod.ERRO, busca.id_legalone,
+                     "cadastro em andamento")
         resultado = self.automador.cadastrar_tarefa(
             busca.id_legalone, self.executar, perfil
         )
