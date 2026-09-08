@@ -659,7 +659,7 @@ def _modo_rodada(args: argparse.Namespace) -> int:
                          "no Legal One.", config.DEBUG_PORT)
             return SAIDA_ABORTADA
 
-        automador = legalone.AutomadorLegalOne(driver, data_tarefa, perfil)
+        automador = legalone.AutomadorLegalOne(driver, args.data, perfil)
         automador.usar_aba_propria()
 
         rodada = Rodada(

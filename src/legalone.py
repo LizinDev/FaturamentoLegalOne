@@ -1,6 +1,7 @@
 """Automacao do Legal One: busca de processo e cadastro da tarefa."""
 import contextlib
 import dataclasses
+import datetime
 import logging
 import os
 import time
@@ -124,7 +125,7 @@ def conectar() -> webdriver.Chrome:
 class AutomadorLegalOne:
     """Busca processos e cadastra a tarefa do perfil recebido."""
 
-    def __init__(self, driver: webdriver.Chrome, data_tarefa: str,
+    def __init__(self, driver: webdriver.Chrome, data_tarefa: str | None,
                  perfil: "config.PerfilTarefa"):
         self.driver = driver
         self.wait = WebDriverWait(driver, config.TIMEOUT_PADRAO)
@@ -406,8 +407,9 @@ class AutomadorLegalOne:
                 f"Tipo padrao mudou: esperava {perfil.tipo!r}, veio {tipo!r}"
             )
 
-        self._preencher_data("DtInicial", self.data_tarefa)
-        self._preencher_data("DtFinal", self.data_tarefa)
+        data_tarefa = self.data_tarefa or datetime.date.today().strftime("%d/%m/%Y")
+        self._preencher_data("DtInicial", data_tarefa)
+        self._preencher_data("DtFinal", data_tarefa)
         self._selecionar_status(perfil.status)
         self._preencher_responsavel(
             perfil.responsavel_busca, perfil.responsavel_esperado
