@@ -12,6 +12,9 @@ logs/
 *.csv
 *.xlsx
 *.bak
+# Relatorios em texto para a supervisao trazem os mesmos dados. Ancorado na
+# raiz e com prefixo proprio para nao pegar requirements.txt.
+/Relatorio*.txt
 
 # Ferramentas
 .pytest_cache/
