@@ -539,6 +539,50 @@ Sinal de que algo mudou no Legal One. Vale parar e olhar `logs/faturamento.log`:
 o motivo de cada falha fica na coluna `DETALHE` do `relatorio.csv` também.
 Depois de resolver, `--retentar` recoloca os erros na fila.
 
+### O ledger diz cadastrado mas a tarefa não existe
+
+O modo de falha mais caro, porque não aparece em lugar nenhum enquanto roda. O
+Legal One recusa o cadastro por validação e **não mostra erro**: apenas sai do
+formulário de criação, indo para `/processos/tarefas/Edit` com a mensagem na
+tela. O programa reconhece sucesso por ter saído de `CreateFromProcesso`, então
+grava `ok`. O log diz `cadastrada`, o placar não acusa nada, e a planilha do dia
+vai para a supervisão com linhas que não existem no sistema.
+
+Duas causas confirmadas em produção:
+
+| Mensagem na tela | Causa |
+| --- | --- |
+| (nenhuma; formulário recusa a data) | Data de início anterior ao dia corrente — acontece quando a rodada atravessa a meia-noite com `--data` fixa |
+| `O conteúdo informado no campo 'Nome' já existe` | O responsável já consta como envolvido da tarefa, e é preenchido de novo |
+
+A primeira já tem conserto: sem `--data`, a data é recalculada a cada cadastro.
+A segunda continua aberta.
+
+**Como auditar uma rodada.** A conferência é feita com a mesma checagem de
+duplicata que o programa já usa, sobre a planilha do dia:
+
+```python
+import legalone, config, openpyxl
+ws = openpyxl.load_workbook("../data/cadastrados_AAAA-MM-DD.xlsx", read_only=True).active
+a = legalone.AutomadorLegalOne(legalone.conectar(), "DD/MM/AAAA",
+                               config.PERFIS["defesa-faturada"])
+a.usar_aba_propria()
+for l in ws.iter_rows(min_row=2, values_only=True):
+    print(l[0], a.tarefa_ja_existe(str(l[1]), l[2]))   # processo, id, tarefa
+```
+
+Gasta ~2,5 s por processo (uma planilha de 2.600 leva perto de duas horas) e
+exige o Chrome livre, como a rodada. Dê **duas tentativas** antes de dar um
+processo como ausente: é esse resultado que decide o que sai do ledger.
+
+O que não existir deve ser **removido** do ledger (`delete from processos where
+cnj = ? and tarefa = ?`), e não marcado como erro — assim volta à fila numa
+rodada normal, sem depender de `--retentar`. Faça backup do ledger antes e
+refaça os relatórios com `--relatorio` depois.
+
+Medido em 09-10/09/2026: 208 ausentes em 3.003 cadastros (6,9%), distribuídos
+de forma que não se explica por tribunal nem por horário.
+
 ### `nao_encontrado` alto
 
 Esperado. Boa parte da planilha é de processo antigo que não está no Legal One —

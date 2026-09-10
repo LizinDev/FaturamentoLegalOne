@@ -184,6 +184,22 @@ seguidos o programa para, descarta esses registros suspeitos do ledger e avisa.
 sucesso. O descarte só alcança registros pendentes: `ok`, `recadastrada` e
 `ja_existia` são trabalho confirmado no Legal One e nunca são apagados.
 
+**Recusa silenciosa no Salvar** — o caso que *nenhuma* trava alcança, e por
+isso o mais caro. O Legal One pode recusar o cadastro por validação (data de
+início anterior ao dia corrente, responsável que já consta como envolvido) sem
+mostrar erro: ele apenas sai do formulário de criação. Como o sucesso é
+reconhecido justamente por sair de `CreateFromProcesso`, a recusa é lida como
+cadastro feito, o processo entra no ledger como `ok` e o relatório o lista. A
+tarefa nunca existiu.
+
+Medido em 09-10/09/2026 na `Faturamento 2024.xlsx`: de 3.003 cadastros dados
+como feitos, **208 não existiam** (6,9%) — conferidos um a um no Legal One. Não
+é erro, não é sessão expirada, não é "não encontrado": o log mostra `cadastrada`
+no ritmo normal e o placar não acusa nada. Enquanto o salvamento não for
+confirmado pela grade (ou pela ausência de `.validation-summary-errors`) em vez
+da URL, **toda rodada precisa ser auditada depois** — ver
+[Manual](MANUAL.md#o-ledger-diz-cadastrado-mas-a-tarefa-não-existe).
+
 **`Ctrl+C`** — encerra limpo, exporta os relatórios e mantém o progresso.
 
 Em qualquer saída — inclusive erro fatal ou `Ctrl+C` — os relatórios são
