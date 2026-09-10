@@ -246,6 +246,58 @@ def test_cobranca_casa_sem_ligar_para_caixa_e_espacos(tmp_path, escrito):
     assert [p.tarefa for p in processos] == ["DEFESA FATURADA"]
 
 
+def test_coluna_tarefa_vale_como_tipo_de_cobranca(tmp_path):
+    # A planilha de 2022 chama a coluna de "TAREFA". Sem o alias a aba inteira
+    # e lida como se a coluna estivesse vazia e todas as linhas sao puladas.
+    arq = _planilha(tmp_path, {"2022": [
+        ("PROCESSO", "STATUS ESPAIDER", "STATUS E-LAW", "TAREFA"),
+        (CNJ_A, None, None, "DEFESA FATURADA"),
+        (CNJ_B, None, None, "FATURAMENTO FINAL"),
+    ]})
+
+    processos = planilha.ler(arq, tarefa_da_linha=config.tarefa_do_tipo)
+
+    assert [(p.cnj, p.tarefa) for p in processos] == [
+        (CNJ_A, "DEFESA FATURADA"), (CNJ_B, "FATURAMENTO FINAL"),
+    ]
+
+
+def test_tipo_de_cobranca_ganha_de_tarefa_quando_as_duas_existem(tmp_path):
+    # Nome canonico primeiro: a coluna velha manda onde ela estiver preenchida.
+    arq = _planilha(tmp_path, {"2026": [
+        ("PROCESSO", "TIPO DE COBRANÇA", "TAREFA"),
+        (CNJ_A, "DEFESA FATURADA", "FATURAMENTO FINAL"),
+    ]})
+
+    processos = planilha.ler(arq, tarefa_da_linha=config.tarefa_do_tipo)
+
+    assert [p.tarefa for p in processos] == ["DEFESA FATURADA"]
+
+
+def test_tarefa_preenche_onde_tipo_de_cobranca_esta_vazia(tmp_path):
+    arq = _planilha(tmp_path, {"2026": [
+        ("PROCESSO", "TIPO DE COBRANÇA", "TAREFA"),
+        (CNJ_A, None, "DEFESA FATURADA"),
+        (CNJ_B, "  ", "FATURAMENTO FINAL"),
+    ]})
+
+    processos = planilha.ler(arq, tarefa_da_linha=config.tarefa_do_tipo)
+
+    assert [p.tarefa for p in processos] == ["DEFESA FATURADA", "FATURAMENTO FINAL"]
+
+
+def test_filtro_por_tipo_alcanca_a_coluna_tarefa(tmp_path):
+    arq = _planilha(tmp_path, {"2022": [
+        ("PROCESSO", "TAREFA"),
+        (CNJ_A, "DEFESA FATURADA"),
+        (CNJ_B, "FATURAMENTO FINAL"),
+    ]})
+
+    processos = planilha.ler(arq, tipo_contem="defesa")
+
+    assert [p.cnj for p in processos] == [CNJ_A]
+
+
 def test_sem_a_funcao_a_leitura_e_a_de_sempre(tmp_path):
     arq = _planilha(tmp_path, {"2026": [
         CABECALHO,

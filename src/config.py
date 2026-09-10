@@ -133,7 +133,14 @@ STATUS_VALIDOS = {
 # --- Planilha ----------------------------------------------------------------
 
 COLUNA_PROCESSO = "PROCESSO"
-COLUNA_TIPO_COBRANCA = "TIPO DE COBRANÇA"
+# A coluna que diz a cobranca de cada linha nao tem nome unico nas planilhas que
+# chegam: as antigas trazem "TIPO DE COBRANÇA", a de 2022 traz "TAREFA". Sao
+# nomes do mesmo campo, entao vale a primeira que a aba tiver — sem isso a aba
+# inteira e lida como se a coluna estivesse vazia, e no modo auto todas as
+# linhas sao puladas em silencio.
+COLUNAS_TIPO_COBRANCA = ("TIPO DE COBRANÇA", "TAREFA")
+# Nome canonico, para as mensagens de log e a ajuda da CLI.
+COLUNA_TIPO_COBRANCA = COLUNAS_TIPO_COBRANCA[0]
 COLUNA_STATUS_LEGALONE = "STATUS LEGAL ONE"
 
 # --- Execucao ----------------------------------------------------------------
@@ -170,5 +177,5 @@ def planilha_do_dia(dia: str) -> str:
     return str(DATA_DIR / f"cadastrados_{dia}.xlsx")
 
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 PROJECT_NAME = "Cadastro de tarefas em lote - Legal One"

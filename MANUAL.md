@@ -63,19 +63,21 @@ estão bons.
 
 ## A receita de um dia
 
-A cota combinada é de ~500 cadastros por dia, alternando as duas planilhas.
+O normal é rodar a planilha inteira e deixar ir até o fim. `--max-cadastros`
+existe para quando você quiser parar num número — não há limite diário a
+respeitar.
 
-**Dia ímpar — faturamento:**
+**Faturamento:**
 
 ```powershell
 cd C:\Users\Kamila\projetos\FaturamentoLegalOne\src
-python main.py --planilha "C:\Users\Kamila\Downloads\Faturamento.xlsx" --max-cadastros 500 --executar
+python main.py --planilha "C:\Users\Kamila\Downloads\Faturamento.xlsx" --executar
 ```
 
-**Dia par — defesa:**
+**Defesa:**
 
 ```powershell
-python main.py --planilha "C:\Users\Kamila\Downloads\Defesas.xlsx" --tarefa defesa-faturada --max-cadastros 500 --executar
+python main.py --planilha "C:\Users\Kamila\Downloads\Defesas.xlsx" --tarefa defesa-faturada --executar
 ```
 
 O nome do arquivo não é livre: cada perfil exige um trecho no caminho da
@@ -85,17 +87,21 @@ planilha (`Faturamento` e `Defesa`) e recusa o par errado com código 2 — ver
 **Planilha única, com as duas tarefas misturadas na mesma aba:**
 
 ```powershell
-python main.py --planilha "..\Planilha de Faturamento.xlsx" --abas "2019-2020-2021" --tarefa auto --max-cadastros 500 --executar
+python main.py --planilha "..\Planilha de Faturamento.xlsx" --abas "2019-2020-2021" --tarefa auto --executar
 ```
 
-Aqui não se alterna planilha: cada linha recebe a tarefa que a coluna
-`TIPO DE COBRANÇA` indica, e a cota do dia sai da fila inteira. Ver
+Aqui cada linha recebe a tarefa que a coluna da cobrança indica. Ver
 [`--tarefa auto`](#valores-da-tarefa).
 
 Não é preciso anotar por onde parou nem qual planilha foi a última. O ledger
-guarda o progresso **por tarefa**, então cada rodada pega os próximos 500 ainda
-não cadastrados daquele perfil. Ao terminar, a planilha do dia é gerada sozinha
+guarda o progresso **por tarefa**, então cada rodada pega o que ainda não foi
+cadastrado daquele perfil. Ao terminar, a planilha do dia é gerada sozinha
 em `data/`.
+
+Uma rodada de milhares de processos leva horas e vai ser interrompida —
+sessão que expira, máquina que reinicia. Isso é esperado e não custa nada:
+repetir o mesmo comando retoma de onde parou. Ao fim, uma passada de
+`--retentar` recolhe o que falhou pelo caminho.
 
 Ao fim de cada rodada, o resumo sai no console:
 
@@ -105,7 +111,7 @@ Planilha do dia:      ...\data\cadastrados_2026-07-30.xlsx
 ```
 
 `ok` e `recadastrada` somados são o que entrou no Legal One naquela rodada — é o
-que a planilha do dia mostra e o que corresponde à cota. `recadastrada` é o
+que a planilha do dia mostra. `recadastrada` é o
 processo que já tinha a tarefa e recebeu outra, seguindo a orientação de
 "pode agendar novamente, vamos pecar pelo excesso"; na planilha do dia essas
 linhas vêm marcadas na coluna `JÁ TINHA A TAREFA`.
@@ -192,16 +198,15 @@ ainda não vistos, e não os 20 primeiros da planilha.
 **`--max-cadastros N`**
 
 Para depois de **cadastrar** N tarefas. Processo não encontrado e processo que
-deu erro **não consomem cota**. Recadastro consome: ele cria tarefa no Legal One
+deu erro **não são contados**. Recadastro é: ele cria tarefa no Legal One
 como qualquer outro (com `--pular-existentes`, o processo é pulado e não conta).
 
-É esta a flag que corresponde à meta combinada: `--max-cadastros 500` são 500
-tarefas criadas no Legal One. `--limite 500` seriam 500 processos olhados,
-resultando em bem menos cadastros (cerca de 1 em 4 da planilha não existe no
-Legal One).
+Repare na diferença para `--limite`: `--max-cadastros 300` são 300 tarefas
+criadas no Legal One, enquanto `--limite 300` seriam 300 processos olhados,
+resultando em menos cadastros quando parte da planilha não existe lá.
 
 As duas exigem inteiro **maior que zero**. `--max-cadastros 0` é recusado com
-código 2 de propósito: zero é falso em Python e passaria como "sem cota",
+código 2 de propósito: zero é falso em Python e passaria como "sem limite",
 rodando a planilha inteira em vez de parar na hora.
 
 ### Valores da tarefa
@@ -242,7 +247,7 @@ linha), e o mesmo número que aparece com as duas cobranças recebe **as duas
 tarefas** — são etapas diferentes do mesmo caso.
 
 ```powershell
-python main.py --planilha "..\Planilha de Faturamento.xlsx" --abas "2019-2020-2021" --tarefa auto --max-cadastros 500 --executar
+python main.py --planilha "..\Planilha de Faturamento.xlsx" --abas "2019-2020-2021" --tarefa auto --executar
 ```
 
 **`--data DD/MM/AAAA`**
@@ -385,7 +390,7 @@ Combinações inofensivas, que só rendem um aviso e seguem:
 
 | Código | Significado |
 | --- | --- |
-| `0` | Terminou a fila (inclusive "nada a fazer" e cota do dia atingida) |
+| `0` | Terminou a fila (inclusive "nada a fazer" e `--max-cadastros` atingido) |
 | `1` | Abortou: não conectou ao Chrome, sessão expirada ou disjuntor |
 | `2` | Erro de uso: flag faltando, combinação inválida, planilha × tarefa incompatível, data ou planilha inválida, aba inexistente |
 | `130` | `Ctrl+C` |
@@ -441,8 +446,21 @@ Aba sem essa coluna é ignorada com um aviso, e não derruba a leitura.
 | Coluna | Obrigatória | Uso |
 | --- | --- | --- |
 | `PROCESSO` | sim | O número CNJ a buscar |
-| `TIPO DE COBRANÇA` | não | Filtro `--tipo-contem`, coluna dos relatórios e, com `--tarefa auto`, a tarefa daquela linha |
+| `TIPO DE COBRANÇA` **ou** `TAREFA` | não | Filtro `--tipo-contem`, coluna dos relatórios e, com `--tarefa auto`, a tarefa daquela linha |
 | `STATUS LEGAL ONE` | não | Filtro `--status-planilha` e coluna dos relatórios |
+
+**A coluna da cobrança tem dois nomes aceitos.** As planilhas antigas trazem
+`TIPO DE COBRANÇA`; a de 2022 traz `TAREFA`. São tratadas como o mesmo campo, e
+vale a primeira que tiver valor na linha — `TIPO DE COBRANÇA` primeiro. Se a
+sua planilha usar um terceiro nome, acrescente-o a `COLUNAS_TIPO_COBRANCA`, em
+`src/config.py`.
+
+Isso importa mais do que parece: sem o nome reconhecido, a coluna passa a valer
+como vazia e **`--tarefa auto` pula a aba inteira em silêncio**. Pior, se o nome
+do arquivo contiver `Faturamento` ou `Defesa`, a trava de perfil não segura — o
+programa cadastraria a tarefa do nome do arquivo em todas as linhas, inclusive
+nas da outra tarefa. Confira no cabeçalho da rodada que a contagem por tarefa
+bate com a planilha antes de deixar rodar.
 
 Os nomes das colunas são reconhecidos sem ligar para maiúsculas nem espaços
 sobrando, mas o acento conta: `TIPO DE COBRANCA` sem cedilha não é reconhecida e

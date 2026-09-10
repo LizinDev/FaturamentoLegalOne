@@ -64,7 +64,7 @@ O programa **nunca abre uma instância nova** de Chrome: conecta na que já est�
 aberta e trabalha numa aba própria, sem mexer nas outras abas. É a sessão dessa
 janela que ele usa — daí a exigência de estar logado antes.
 
-O passo a passo (abrir o Chrome, pré-voo, simulação, rodada real, cota do dia) e
+O passo a passo (abrir o Chrome, pré-voo, simulação, rodada real, retomada) e
 a referência completa das flags estão no
 **[Manual de operação](MANUAL.md)**. Para mexer no código, veja
 [Desenvolvimento](#desenvolvimento).
@@ -88,9 +88,8 @@ cadastra), para o dia em que a orientação mudar.
 
 Duas consequências disso:
 
-- **Recadastro consome cota.** Ele cria uma tarefa no Legal One como qualquer
-  outro, então entra na conta de `--max-cadastros`. 500 por dia passa a incluir
-  as repetidas.
+- **Recadastro conta em `--max-cadastros`.** Ele cria uma tarefa no Legal One
+  como qualquer outro, então entra na conta quando você limita a rodada.
 - **`--retentar` devolve os `ja_existia` antigos para a fila.** São exatamente os
   casos que a orientação atual manda cadastrar. Registros `ok` e `recadastrada` —
   o que este programa cadastrou — continuam fora.
@@ -251,8 +250,16 @@ Qualquer um desses arquivos pode ser refeito depois com `--relatorio`
 
 ## Planilha esperada
 
-O formato aceito está no [manual](MANUAL.md#a-planilha-de-entrada). Duas
+O formato aceito está no [manual](MANUAL.md#a-planilha-de-entrada). Três
 decisões por trás dele:
+
+A coluna da cobrança aceita **dois nomes**, `TIPO DE COBRANÇA` e `TAREFA`
+(`COLUNAS_TIPO_COBRANCA`, em `config.py`). Não é conveniência: as planilhas
+chegam de origens diferentes e a de 2022 batizou a coluna de `TAREFA`. Com um
+nome só, aquela aba seria lida como se a coluna estivesse vazia — no modo auto
+todas as linhas seriam puladas em silêncio, e nos perfis fixos a trava de nome
+de arquivo deixaria passar a tarefa errada para as 1.108 linhas de defesa que o
+arquivo `Faturamento 2022.xlsx` continha.
 
 Números repetidos entre abas viram **um processo só** — a tarefa é cadastrada
 uma vez, e a origem agregada aparece no relatório. Com `--tarefa auto` isso vale
@@ -291,7 +298,7 @@ Nenhum teste toca no Legal One, no Chrome ou no ledger de produção: o Selenium
 temporário. O que está coberto é justamente o que dói quando quebra — a
 interpretação da grade de resultados (em qual pasta a tarefa vai), o ledger
 (inclusive as migrações de esquema antigo) e as regras que param ou não param a
-fila: disjuntor, cota do dia, sessão expirada, `Ctrl+C` e erro isolado.
+fila: disjuntor, `--max-cadastros`, sessão expirada, `Ctrl+C` e erro isolado.
 
 `ruff format` **não** é usado: o código é alinhado à mão e reformatar tudo
 esconderia o histórico atrás de uma mudança de estilo.
@@ -369,7 +376,13 @@ Para os ~12 mil processos únicos da planilha, o fluxo completo fica na casa das
 
 ## Versão
 
-**1.5.0** — tarefa que já existe passa a ser cadastrada de novo, seguindo a
+**1.6.0** — a coluna da cobrança passa a aceitar `TAREFA` além de
+`TIPO DE COBRANÇA`, para a planilha de 2022, que batizou a coluna assim. Sem
+isso a aba é lida como se a coluna estivesse vazia, e o modo auto pula tudo em
+silêncio. Some também a menção a uma cota diária de cadastros: o normal é rodar
+a planilha inteira, e `--max-cadastros` fica como limite sob demanda.
+
+1.5.0 — tarefa que já existe passa a ser cadastrada de novo, seguindo a
 orientação de operação; a situação `recadastrada` e a coluna `JÁ TINHA A TAREFA`
 marcam o excesso, e `--pular-existentes` guarda o comportamento antigo.
 

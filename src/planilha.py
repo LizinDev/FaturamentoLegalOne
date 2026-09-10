@@ -67,12 +67,21 @@ def _indices_cabecalho(linha) -> dict[str, int]:
     return indices
 
 
-def _celula(linha, indices: dict[str, int], coluna: str) -> str:
-    """Valor de uma coluna nomeada, ja normalizado ("" se ausente ou vazia)."""
-    i = indices.get(coluna)
-    if i is None or i >= len(linha) or linha[i] is None:
-        return ""
-    return " ".join(str(linha[i]).split())
+def _celula(linha, indices: dict[str, int], *colunas: str) -> str:
+    """Valor de uma coluna nomeada, ja normalizado ("" se ausente ou vazia).
+
+    Com mais de um nome, vale o primeiro que tiver valor naquela linha: sao
+    nomes alternativos do mesmo campo (ver COLUNAS_TIPO_COBRANCA), e a planilha
+    pode trazer a coluna velha em branco ao lado da nova.
+    """
+    for coluna in colunas:
+        i = indices.get(coluna)
+        if i is None or i >= len(linha) or linha[i] is None:
+            continue
+        valor = " ".join(str(linha[i]).split())
+        if valor:
+            return valor
+    return ""
 
 
 def ler(
@@ -133,7 +142,7 @@ def ler(
                 if not bruto:
                     continue
 
-                tipo = _celula(linha, indices, config.COLUNA_TIPO_COBRANCA)
+                tipo = _celula(linha, indices, *config.COLUNAS_TIPO_COBRANCA)
                 status = _celula(linha, indices, config.COLUNA_STATUS_LEGALONE)
 
                 if tipo_contem and tipo_contem.upper() not in tipo.upper():
