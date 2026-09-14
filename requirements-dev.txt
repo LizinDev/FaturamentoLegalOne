@@ -6,4 +6,4 @@ pytest==9.1.1
 
 # Lint. Versao presa de proposito: uma release nova do ruff pode estrear regras
 # e reprovar na CI um codigo que nao mudou.
-ruff==0.16.1
+ruff==0.16.7
