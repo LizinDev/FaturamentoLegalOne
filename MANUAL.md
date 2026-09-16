@@ -391,13 +391,16 @@ Combinações inofensivas, que só rendem um aviso e seguem:
 | Código | Significado |
 | --- | --- |
 | `0` | Terminou a fila (inclusive "nada a fazer" e `--max-cadastros` atingido) |
-| `1` | Abortou: não conectou ao Chrome, sessão expirada ou disjuntor |
+| `1` | Abortou: não conectou ao Chrome ou disjuntor |
 | `2` | Erro de uso: flag faltando, combinação inválida, planilha × tarefa incompatível, data ou planilha inválida, aba inexistente |
+| `3` | Sessão expirada: alguém precisa fazer login antes de repetir |
 | `130` | `Ctrl+C` |
 
-O código 2 acontece **antes** de qualquer cadastro. O 1 e o 130 podem acontecer
-no meio da rodada — em qualquer um dos três o progresso está salvo no ledger e
-repetir o mesmo comando retoma de onde parou.
+O código 2 acontece **antes** de qualquer cadastro. O 1, o 3 e o 130 podem
+acontecer no meio da rodada — em qualquer um deles o progresso está salvo no
+ledger e repetir o mesmo comando retoma de onde parou. O 3 é separado do 1 para
+um script que reinicia a rodada sozinho saber quando parar de tentar: repetir
+sem login só gasta tentativas.
 
 ---
 
@@ -407,6 +410,7 @@ repetir o mesmo comando retoma de onde parou.
 | --- | --- | --- |
 | `DEBUG_PORT` | `9222` | Porta de debug do Chrome |
 | `LOG_LEVEL` | `INFO` | `DEBUG` para log detalhado. Valor inválido cai em `INFO` em vez de impedir a rodada |
+| `FATURAMENTO_LOG_FILE` | `logs/faturamento.log` | Outro arquivo de log; vazio desliga o arquivo (os testes usam assim, para não sujar o log de produção) |
 
 ```powershell
 $env:LOG_LEVEL = "DEBUG"
@@ -446,11 +450,12 @@ Aba sem essa coluna é ignorada com um aviso, e não derruba a leitura.
 | Coluna | Obrigatória | Uso |
 | --- | --- | --- |
 | `PROCESSO` | sim | O número CNJ a buscar |
-| `TIPO DE COBRANÇA` **ou** `TAREFA` | não | Filtro `--tipo-contem`, coluna dos relatórios e, com `--tarefa auto`, a tarefa daquela linha |
+| `TIPO DE COBRANÇA`, `TAREFA` **ou** `TAREFA PARA LANÇAR` | não | Filtro `--tipo-contem`, coluna dos relatórios e, com `--tarefa auto`, a tarefa daquela linha |
 | `STATUS LEGAL ONE` | não | Filtro `--status-planilha` e coluna dos relatórios |
 
-**A coluna da cobrança tem dois nomes aceitos.** As planilhas antigas trazem
-`TIPO DE COBRANÇA`; a de 2022 traz `TAREFA`. São tratadas como o mesmo campo, e
+**A coluna da cobrança tem três nomes aceitos.** As planilhas antigas trazem
+`TIPO DE COBRANÇA`; a de 2022 e a de 2025 trazem `TAREFA`; a de 2026 traz
+`TAREFA PARA LANÇAR`. São tratadas como o mesmo campo, e
 vale a primeira que tiver valor na linha — `TIPO DE COBRANÇA` primeiro. Se a
 sua planilha usar um terceiro nome, acrescente-o a `COLUNAS_TIPO_COBRANCA`, em
 `src/config.py`.
@@ -510,7 +515,7 @@ A janela com `--remote-debugging-port=9222` está aberta? Ela precisa continuar
 aberta durante toda a rodada. Se estiver aberta e mesmo assim falhar, confirme a
 porta com `DEBUG_PORT`.
 
-### "SESSAO EXPIRADA" (código 1)
+### "SESSAO EXPIRADA" (código 3)
 
 O Legal One redirecionou para a tela de login. A rodada para na hora, de
 propósito — sem isso, todo o resto da fila viraria erro em silêncio. Faça login
@@ -532,6 +537,37 @@ automação viram `erro` e podem ocorrer isoladamente, mas três `erro` seguidos
 fazem a rodada parar. Confira o Chrome e o Legal One; depois rode novamente com
 `--retentar`. Este disjuntor não descarta registros do ledger: os erros ficam
 salvos para a nova tentativa.
+
+### Todo processo falha com "element click intercepted" no Salvar
+
+Quase sempre é um **aviso in-app do Legal One** (Pendo) no canto de baixo da
+tela, por cima do botão Salvar. Ele volta em toda página até alguém dispensar, e
+em 16/09/2026 fez o disjuntor disparar a cada reinício. Desde a 1.7.0 o programa
+clica sozinho em **"Ok, entendi"** (ou no X do aviso) antes do Salvar, e numa
+interceptação espera a máscara de carregamento sair e tenta o clique uma segunda
+vez. Se ainda assim acontecer, o aviso mudou de formato: abra a aba de trabalho,
+dispense à mão e repita o comando. Botões do aviso que abrem outra página (por
+exemplo "Canais de Atendimento") nunca são clicados.
+
+### "SalvarIncerto: nao salvou: formulario nao avancou"
+
+O Salvar foi clicado e a página não saiu do formulário. Diferente dos outros
+erros, **a tarefa pode ter sido gravada**: em 15/09/2026, processos com esse erro
+recadastrados no `--retentar` ficaram com a tarefa em dobro.
+
+Por isso o erro guarda no `DETALHE` quantas tarefas iguais o processo tinha
+antes do clique (`[tarefas antes do Salvar: N]`); um `Ctrl+C` no meio do
+cadastro deixa a mesma marca. Na retentativa o programa conta de novo: se subiu,
+o Salvar tinha gravado — o processo vira `ok` com "conferido pela contagem" e
+**não** é cadastrado outra vez. Se não subiu, cadastra normalmente.
+
+Dois limites: sem contagem (`--rapido`) não há conferência; e registros de antes
+da 1.7.0 não têm a marca, então um `erro` antigo com "nao salvou" é recadastrado
+como sempre foi — confira esses à mão na aba de compromissos do processo.
+
+**Não confira logo depois do Salvar.** A lista de tarefas da pasta demora a
+mostrar uma tarefa recém-gravada, e uma checagem imediata diz "não existe" para
+o que existe. Cadastrar de novo por causa disso gera duplicata.
 
 ### `erro` subindo rápido no placar
 

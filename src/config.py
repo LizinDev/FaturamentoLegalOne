@@ -21,18 +21,22 @@ LOGS_DIR = BASE_DIR / "logs"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-LOG_FILE = str(LOGS_DIR / "faturamento.log")
+# FATURAMENTO_LOG_FILE vazio desliga o arquivo. Os testes usam isso: sem a
+# variavel, cada pytest gravava centenas de linhas de rodada simulada (erros,
+# sessao expirada, processos "A" e "B") no log de producao, que e justamente
+# onde se procura o motivo das falhas reais.
+LOG_FILE = os.environ.get("FATURAMENTO_LOG_FILE", str(LOGS_DIR / "faturamento.log"))
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
+_handlers: list[logging.Handler] = [logging.StreamHandler()]
+if LOG_FILE:
+    _handlers.insert(0, logging.FileHandler(LOG_FILE, encoding="utf-8"))
 logging.basicConfig(
     # LOG_LEVEL invalido cai em INFO: um nome errado na variavel de ambiente
     # nao deve impedir a rodada de comecar.
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
+    handlers=_handlers,
 )
 
 # --- Legal One / NovaJus -----------------------------------------------------
@@ -134,11 +138,11 @@ STATUS_VALIDOS = {
 
 COLUNA_PROCESSO = "PROCESSO"
 # A coluna que diz a cobranca de cada linha nao tem nome unico nas planilhas que
-# chegam: as antigas trazem "TIPO DE COBRANÇA", a de 2022 traz "TAREFA". Sao
-# nomes do mesmo campo, entao vale a primeira que a aba tiver — sem isso a aba
-# inteira e lida como se a coluna estivesse vazia, e no modo auto todas as
-# linhas sao puladas em silencio.
-COLUNAS_TIPO_COBRANCA = ("TIPO DE COBRANÇA", "TAREFA")
+# chegam: as antigas trazem "TIPO DE COBRANÇA", a de 2022 traz "TAREFA" e a de
+# 2026 traz "TAREFA PARA LANÇAR". Sao nomes do mesmo campo, entao vale a
+# primeira que a aba tiver — sem isso a aba inteira e lida como se a coluna
+# estivesse vazia, e no modo auto todas as linhas sao puladas em silencio.
+COLUNAS_TIPO_COBRANCA = ("TIPO DE COBRANÇA", "TAREFA", "TAREFA PARA LANÇAR")
 # Nome canonico, para as mensagens de log e a ajuda da CLI.
 COLUNA_TIPO_COBRANCA = COLUNAS_TIPO_COBRANCA[0]
 COLUNA_STATUS_LEGALONE = "STATUS LEGAL ONE"
@@ -158,6 +162,11 @@ MAX_NAO_ENCONTRADOS_SEGUIDOS = 25
 # Falhas de automacao em sequencia quase sempre significam que o Chrome ou a
 # sessao deixaram de responder; continuar so transforma a fila inteira em erro.
 MAX_ERROS_SEGUIDOS = 3
+# Quantas vezes digitar a descricao antes de desistir. O formulario de tarefa as
+# vezes termina de inicializar depois de visivel e apaga o que foi digitado: em
+# 13-15/09/2026 foram 87 erros "campo Descricao ficou ''", que em sequencia
+# disparavam o disjuntor sem nada de errado com o processo.
+TENTATIVAS_DESCRICAO = 3
 DEBUG_PORT = int(os.environ.get("DEBUG_PORT", "9222"))
 DEBUG_ADDRESS = f"localhost:{DEBUG_PORT}"
 
@@ -177,5 +186,5 @@ def planilha_do_dia(dia: str) -> str:
     return str(DATA_DIR / f"cadastrados_{dia}.xlsx")
 
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 PROJECT_NAME = "Cadastro de tarefas em lote - Legal One"

@@ -7,13 +7,15 @@ linha. Por padrao roda em simulacao — precisa de --executar para gravar.
 
 Codigos de saida:
     0    rodada completa (ou nada a fazer)
-    1    rodada abortada: sessao expirada, disjuntor ou Chrome fora do ar
+    1    rodada abortada: disjuntor ou Chrome fora do ar
     2    erro de uso (argumento ou planilha invalida)
+    3    sessao expirada: precisa de login antes de repetir o comando
     130  interrompida com Ctrl+C
 """
 import argparse
 import datetime
 import logging
+import re
 import sys
 import time
 
@@ -29,9 +31,18 @@ FORMATO_DATA = "%d/%m/%Y"     # como o Legal One espera a data da tarefa
 FORMATO_DIA = "%Y-%m-%d"      # como o ledger guarda e como se nomeia a planilha
 PASSO_PROGRESSO = 25          # de quantos em quantos processos sai o ETA
 
+# Marca que um Salvar incerto deixa no detalhe do ledger, com a contagem de
+# tarefas de antes do clique. Ver Rodada._salvar_anterior_gravou.
+MARCA_ANTES_DO_SALVAR = "[tarefas antes do Salvar: {}]"
+_RE_ANTES_DO_SALVAR = re.compile(r"\[tarefas antes do Salvar: (\d+)\]")
+
 SAIDA_OK = 0
 SAIDA_ABORTADA = 1
 SAIDA_USO = 2
+# Separada do 1 porque pede outra reacao: disjuntor e Chrome caido se resolvem
+# repetindo o comando, sessao expirada so com alguem fazendo login. Um script
+# que reinicia a rodada sozinho precisa distinguir sem ler o log.
+SAIDA_SESSAO = 3
 SAIDA_INTERROMPIDA = 130
 
 
@@ -245,6 +256,9 @@ class Rodada:
         self.interrompida = False
         self.sessao_expirada: legalone.SessaoExpirada | None = None
         self._busca: legalone.ResultadoBusca | None = None
+        # Tarefas iguais que o processo tinha antes do Salvar; None quando nao
+        # houve contagem (--rapido) ou o processo nao chegou la.
+        self._antes: int | None = None
 
     # --- laco ----------------------------------------------------------------
 
@@ -255,6 +269,7 @@ class Rodada:
         try:
             for i, proc in enumerate(fila, 1):
                 self._busca = None
+                self._antes = None
                 try:
                     if not self._um_processo(proc, i, total):
                         break
@@ -262,6 +277,11 @@ class Rodada:
                 except legalone.SessaoExpirada:
                     raise
                 except Exception as e:
+                    detalhe = f"{type(e).__name__}: {e}"[:400]
+                    if (isinstance(e, legalone.SalvarIncerto)
+                            and self._antes is not None):
+                        detalhe = (detalhe[:350] + " "
+                                   + MARCA_ANTES_DO_SALVAR.format(self._antes))
                     self._anotar(
                         proc, ledger_mod.ERRO,
                         # Se a busca chegou a achar o processo, guarda o id: e
@@ -269,7 +289,7 @@ class Rodada:
                         id_legalone=(self._busca.id_legalone
                                      if self._busca and self._busca.encontrado
                                      else ""),
-                        detalhe=f"{type(e).__name__}: {e}"[:400],
+                        detalhe=detalhe,
                     )
                     self.contagem["erro"] += 1
                     logger.error("[%d/%d] %s — ERRO: %s: %s",
@@ -330,12 +350,27 @@ class Rodada:
                         i, total, proc.cnj, busca.id_legalone, busca.status)
             return True
 
+        # Lido antes de qualquer _anotar, que sobrescreve o detalhe.
+        detalhe_anterior = self.registro.detalhe(proc.cnj, perfil.descricao)
+
         # A checagem nao decide mais se cadastra — decide o que registrar. A
         # orientacao de operacao para a tarefa que ja existe e cadastrar de novo
         # ("pecar pelo excesso"), e o valor da checagem virou saber quais foram.
-        ja_existia = not self.rapido and self.automador.tarefa_ja_existe(
-            busca.id_legalone, perfil.descricao
-        )
+        if not self.rapido:
+            self._antes = self.automador.contar_tarefas(
+                busca.id_legalone, perfil.descricao
+            )
+        ja_existia = bool(self._antes)
+
+        if self._salvar_anterior_gravou(detalhe_anterior):
+            self._anotar(proc, ledger_mod.OK, busca.id_legalone,
+                         "cadastrada (o Salvar da tentativa anterior tinha "
+                         "gravado; conferido pela contagem)")
+            return self._contar_cadastro(
+                proc, busca, perfil, i, total, ledger_mod.OK,
+                "ja estava cadastrada pela tentativa anterior — nao cadastrei de novo",
+            )
+
         if ja_existia and self.pular_existentes:
             self._anotar(proc, ledger_mod.JA_EXISTIA, busca.id_legalone,
                          "processo ja tinha a tarefa")
@@ -349,16 +384,42 @@ class Rodada:
         # processo precisa continuar visivel no ledger para ser retomado com
         # --retentar, em vez de desaparecer da fila como se nada tivesse sido
         # tentado.
-        self._anotar(proc, ledger_mod.ERRO, busca.id_legalone,
-                     "cadastro em andamento")
+        # Um Ctrl+C entre o clique e o retorno deixa esta marca no ledger, e a
+        # retentativa confere a contagem do mesmo jeito que num SalvarIncerto.
+        andamento = "cadastro em andamento"
+        if self._antes is not None:
+            andamento += " " + MARCA_ANTES_DO_SALVAR.format(self._antes)
+        self._anotar(proc, ledger_mod.ERRO, busca.id_legalone, andamento)
         resultado = self.automador.cadastrar_tarefa(
             busca.id_legalone, self.executar, perfil
         )
         situacao = ledger_mod.RECADASTRADA if ja_existia else ledger_mod.OK
         detalhe = f"{resultado} (ja tinha a tarefa)" if ja_existia else resultado
         self._anotar(proc, situacao, busca.id_legalone, detalhe)
+        return self._contar_cadastro(proc, busca, perfil, i, total, situacao, detalhe)
+
+    def _salvar_anterior_gravou(self, detalhe_anterior: str) -> bool:
+        """A tentativa anterior clicou Salvar sem confirmar, e a tarefa esta la?
+
+        Sem esta conferencia o --retentar recadastra, e o processo fica com a
+        tarefa em dobro — foi o que aconteceu em 15/09/2026. A prova e a
+        contagem ter subido desde antes daquele clique: so "ja existe" nao
+        basta, porque boa parte dos processos ja tinha a tarefa de anos
+        anteriores. Registro antigo, sem a marca, segue o caminho de sempre.
+        """
+        marca = _RE_ANTES_DO_SALVAR.search(detalhe_anterior)
+        return (marca is not None and self._antes is not None
+                and self._antes > int(marca.group(1)))
+
+    def _contar_cadastro(self, proc: planilha.Processo,
+                         busca: legalone.ResultadoBusca,
+                         perfil: config.PerfilTarefa, i: int, total: int,
+                         situacao: str, detalhe: str) -> bool:
+        """Placar, cota e log de um processo que terminou com a tarefa gravada."""
         self.contagem[situacao] += 1
-        # Recadastro tambem cria tarefa no Legal One, entao consome a cota do dia.
+        # Recadastro tambem cria tarefa no Legal One, entao consome a cota do
+        # dia. O Salvar confirmado na retentativa tambem conta: a tarefa nunca
+        # tinha entrado no placar, e o ledger passa a dizer 'ok' hoje.
         self.cadastradas += 1
         if self.executar:
             self.dias_cadastrados.add(datetime.date.today().isoformat())
@@ -475,7 +536,9 @@ class Rodada:
     def codigo_saida(self) -> int:
         if self.interrompida:
             return SAIDA_INTERROMPIDA
-        if self.disjuntor or self.sessao_expirada:
+        if self.sessao_expirada:
+            return SAIDA_SESSAO
+        if self.disjuntor:
             return SAIDA_ABORTADA
         return SAIDA_OK
 

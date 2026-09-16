@@ -34,9 +34,13 @@ def achou(id_legalone="111", status="Ativo"):
 class AutomadorFalso:
     """Responde o que o teste mandar, e anota o que foi pedido a ele."""
 
-    def __init__(self, buscas=None, ja_existentes=(), ao_cadastrar=None):
+    def __init__(self, buscas=None, ja_existentes=(), ao_cadastrar=None,
+                 contagens=None):
         self.buscas = buscas or {}
         self.ja_existentes = set(ja_existentes)
+        # Quantas tarefas iguais cada id tem; sem entrada, 1 para quem esta em
+        # ja_existentes e 0 para o resto.
+        self.contagens = dict(contagens or {})
         self.ao_cadastrar = ao_cadastrar
         self.cadastrados: list[tuple[str, bool]] = []
         # Descricao pedida em cada cadastro e em cada checagem de duplicata: e o
@@ -65,10 +69,12 @@ class AutomadorFalso:
             raise resposta
         return resposta
 
-    def tarefa_ja_existe(self, id_legalone, descricao):
+    def contar_tarefas(self, id_legalone, descricao):
         self.checagens_de_duplicata += 1
         self.duplicatas_checadas.append(descricao)
-        return id_legalone in self.ja_existentes
+        if id_legalone in self.contagens:
+            return self.contagens[id_legalone]
+        return 1 if id_legalone in self.ja_existentes else 0
 
     def cadastrar_tarefa(self, id_legalone, executar, perfil=None):
         if self.ao_cadastrar is not None:
@@ -361,7 +367,9 @@ def test_sessao_expirada_aborta_a_rodada_inteira(registro, perfil):
     assert automador.buscados == ["A", "B"]
     assert r.sessao_expirada is not None
     assert situacao_de(registro, "B", perfil.descricao) is None  # nao vira 'erro'
-    assert r.codigo_saida() == main.SAIDA_ABORTADA
+    # Codigo proprio: repetir o comando sem login nao adianta, e o script que
+    # reinicia a rodada precisa saber disso sem ler o log.
+    assert r.codigo_saida() == main.SAIDA_SESSAO
 
 
 def test_ctrl_c_encerra_limpo(registro, perfil):
@@ -527,6 +535,7 @@ def test_resumir_nao_explode_com_a_rodada_vazia(registro, perfil, caplog):
     ({}, main.SAIDA_OK),
     ({"disjuntor": True}, main.SAIDA_ABORTADA),
     ({"interrompida": True}, main.SAIDA_INTERROMPIDA),
+    ({"sessao_expirada": legalone.SessaoExpirada("login")}, main.SAIDA_SESSAO),
 ])
 def test_codigo_de_saida(registro, perfil, kw, esperado):
     r = rodada(AutomadorFalso(), registro, perfil)
@@ -534,3 +543,110 @@ def test_codigo_de_saida(registro, perfil, kw, esperado):
         setattr(r, atributo, valor)
 
     assert r.codigo_saida() == esperado
+
+
+# --- Salvar incerto ----------------------------------------------------------
+
+def _detalhe(registro, cnj=CNJ):
+    return registro.con.execute(
+        "SELECT detalhe FROM processos WHERE cnj = ?", (cnj,)
+    ).fetchone()[0]
+
+
+def test_salvar_incerto_guarda_a_contagem_de_antes(registro, perfil):
+    automador = AutomadorFalso(
+        {CNJ: achou()}, contagens={"111": 2},
+        ao_cadastrar=legalone.SalvarIncerto("nao salvou: formulario nao avancou"),
+    )
+    r = rodada(automador, registro, perfil, executar=True)
+
+    r.executar_fila([processo()])
+
+    assert situacao_de(registro, CNJ, perfil.descricao) == ledger_mod.ERRO
+    assert _detalhe(registro).endswith("[tarefas antes do Salvar: 2]")
+
+
+def test_erro_antes_do_salvar_nao_leva_a_marca(registro, perfil):
+    # Sem clique no Salvar nao ha o que conferir: a retentativa cadastra.
+    automador = AutomadorFalso({CNJ: achou()},
+                               ao_cadastrar=RuntimeError("timeout no formulario"))
+    r = rodada(automador, registro, perfil, executar=True)
+
+    r.executar_fila([processo()])
+
+    assert "antes do Salvar" not in _detalhe(registro)
+
+
+def test_retentativa_nao_recadastra_o_que_o_salvar_incerto_gravou(registro, perfil):
+    # 15/09/2026: o --retentar recadastrou processos cujo Salvar tinha gravado,
+    # e eles ficaram com a tarefa em dobro.
+    primeira = AutomadorFalso(
+        {CNJ: achou()}, contagens={"111": 0},
+        ao_cadastrar=legalone.SalvarIncerto("nao salvou: formulario nao avancou"),
+    )
+    rodada(primeira, registro, perfil, executar=True).executar_fila([processo()])
+
+    retentativa = AutomadorFalso({CNJ: achou()}, contagens={"111": 1})
+    r = rodada(retentativa, registro, perfil, executar=True)
+    r.executar_fila([processo()])
+
+    assert retentativa.cadastrados == []
+    assert situacao_de(registro, CNJ, perfil.descricao) == ledger_mod.OK
+    assert "conferido pela contagem" in _detalhe(registro)
+    assert r.contagem["ok"] == 1
+    assert r.cadastradas == 1
+
+
+def test_retentativa_cadastra_quando_a_contagem_nao_subiu(registro, perfil):
+    # O processo ja tinha a tarefa de outro ano: "existe" nao prova que o
+    # Salvar pegou, so a contagem maior que a de antes do clique.
+    primeira = AutomadorFalso(
+        {CNJ: achou()}, contagens={"111": 1},
+        ao_cadastrar=legalone.SalvarIncerto("nao salvou: formulario nao avancou"),
+    )
+    rodada(primeira, registro, perfil, executar=True).executar_fila([processo()])
+
+    retentativa = AutomadorFalso({CNJ: achou()}, contagens={"111": 1})
+    r = rodada(retentativa, registro, perfil, executar=True)
+    r.executar_fila([processo()])
+
+    assert retentativa.cadastrados == [("111", True)]
+    assert situacao_de(registro, CNJ, perfil.descricao) == ledger_mod.RECADASTRADA
+
+
+def test_ctrl_c_no_meio_do_cadastro_tambem_e_conferido(registro, perfil):
+    primeira = AutomadorFalso({CNJ: achou()}, contagens={"111": 0},
+                              ao_cadastrar=KeyboardInterrupt())
+    rodada(primeira, registro, perfil, executar=True).executar_fila([processo()])
+    assert "antes do Salvar: 0" in _detalhe(registro)
+
+    retentativa = AutomadorFalso({CNJ: achou()}, contagens={"111": 1})
+    rodada(retentativa, registro, perfil, executar=True).executar_fila([processo()])
+
+    assert retentativa.cadastrados == []
+    assert situacao_de(registro, CNJ, perfil.descricao) == ledger_mod.OK
+
+
+def test_registro_antigo_sem_marca_segue_o_caminho_de_sempre(registro, perfil):
+    registro.registrar(CNJ, perfil.descricao, ledger_mod.ERRO, id_legalone="111",
+                       detalhe="RuntimeError: nao salvou: formulario nao avancou")
+    automador = AutomadorFalso({CNJ: achou()}, contagens={"111": 1})
+    r = rodada(automador, registro, perfil, executar=True)
+
+    r.executar_fila([processo()])
+
+    assert automador.cadastrados == [("111", True)]
+    assert situacao_de(registro, CNJ, perfil.descricao) == ledger_mod.RECADASTRADA
+
+
+def test_rapido_nao_confere_salvar_incerto(registro, perfil):
+    # Sem contagem nao ha prova: --rapido cadastra, como sempre fez.
+    registro.registrar(CNJ, perfil.descricao, ledger_mod.ERRO, id_legalone="111",
+                       detalhe="SalvarIncerto: x [tarefas antes do Salvar: 0]")
+    automador = AutomadorFalso({CNJ: achou()}, contagens={"111": 1})
+    r = rodada(automador, registro, perfil, executar=True, rapido=True)
+
+    r.executar_fila([processo()])
+
+    assert automador.checagens_de_duplicata == 0
+    assert automador.cadastrados == [("111", True)]

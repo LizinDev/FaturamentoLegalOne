@@ -15,6 +15,9 @@ logs/
 # Relatorios em texto para a supervisao trazem os mesmos dados. Ancorado na
 # raiz e com prefixo proprio para nao pegar requirements.txt.
 /Relatorio*.txt
+# Pastas de entrega por ano (relatorios, copia do ledger, logs, scripts locais):
+# tudo com numero de processo.
+/Faturamento 20*/
 
 # Ferramentas
 .pytest_cache/

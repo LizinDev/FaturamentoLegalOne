@@ -4,10 +4,15 @@ Nada aqui abre o Chrome nem toca no Legal One: o Selenium so aparece como um
 automador falso. Os testes que envolvem arquivos usam sempre `tmp_path` — o
 ledger de producao guarda o historico real de cadastros e nao pode ser tocado.
 """
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Antes do import do config, que configura o logging: teste nao escreve no log
+# de producao.
+os.environ["FATURAMENTO_LOG_FILE"] = ""
 
 RAIZ = Path(__file__).resolve().parent.parent
 SRC = RAIZ / "src"

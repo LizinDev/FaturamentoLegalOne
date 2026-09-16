@@ -262,6 +262,21 @@ def test_coluna_tarefa_vale_como_tipo_de_cobranca(tmp_path):
     ]
 
 
+def test_coluna_tarefa_para_lancar_vale_como_tipo_de_cobranca(tmp_path):
+    # O nome que a planilha de 2026 usa.
+    arq = _planilha(tmp_path, {"2026": [
+        ("PROCESSO", "TAREFA PARA LANÇAR"),
+        (CNJ_A, "DEFESA FATURADA"),
+        (CNJ_B, "FATURAMENTO FINAL"),
+    ]})
+
+    processos = planilha.ler(arq, tarefa_da_linha=config.tarefa_do_tipo)
+
+    assert [(p.cnj, p.tarefa) for p in processos] == [
+        (CNJ_A, "DEFESA FATURADA"), (CNJ_B, "FATURAMENTO FINAL"),
+    ]
+
+
 def test_tipo_de_cobranca_ganha_de_tarefa_quando_as_duas_existem(tmp_path):
     # Nome canonico primeiro: a coluna velha manda onde ela estiver preenchida.
     arq = _planilha(tmp_path, {"2026": [

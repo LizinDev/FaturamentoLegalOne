@@ -8,7 +8,11 @@ import time
 import urllib.parse
 
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchWindowException, TimeoutException
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    NoSuchWindowException,
+    TimeoutException,
+)
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -25,6 +29,16 @@ class SessaoExpirada(Exception):
 
     Sem isso, uma sessao expirada no meio do lote transformaria todos os
     processos restantes em 'erro' e queimaria a fila em silencio.
+    """
+
+
+class SalvarIncerto(RuntimeError):
+    """O Salvar foi clicado, mas o formulario nao avancou.
+
+    Diferente das outras falhas, aqui a tarefa pode ter sido gravada: em
+    15/09/2026, processos que deram este erro e foram recadastrados no
+    --retentar ficaram com a tarefa em dobro. Quem trata o erro guarda quantas
+    tarefas havia antes, para a retentativa conferir se o Salvar pegou.
     """
 
 
@@ -243,9 +257,19 @@ class AutomadorLegalOne:
         return interpretar_busca(resultado["linhas"], cnj)
 
     def tarefa_ja_existe(self, id_legalone: str, descricao: str) -> bool:
-        """Diz se o processo ja tem uma tarefa com essa descricao.
+        """Diz se o processo ja tem uma tarefa com essa descricao."""
+        return self.contar_tarefas(id_legalone, descricao) > 0
 
-        Rede de seguranca para o caso de o ledger ter sido perdido/recriado.
+    def contar_tarefas(self, id_legalone: str, descricao: str) -> int:
+        """Quantas tarefas com essa descricao o processo tem.
+
+        Rede de seguranca para o caso de o ledger ter sido perdido/recriado, e
+        base da conferencia de um Salvar incerto (ver SalvarIncerto): se a
+        contagem subiu desde antes do clique, a tarefa foi gravada.
+
+        A lista do Legal One demora a mostrar uma tarefa recem-salva — contar
+        logo depois do Salvar da falso "nao gravou". Por isso a conferencia so
+        acontece na retentativa, nunca no mesmo processo.
 
         A busca vai por ?Search= na propria URL: a grade de compromissos e
         paginada, entao procurar o texto na pagina inteira daria falso negativo
@@ -291,15 +315,12 @@ class AutomadorLegalOne:
                     "a aba de compromissos/tarefas nao carregou como esperado; "
                     "nao da para checar duplicata"
                 )
-            return False
+            return 0
 
         alvo = descricao.strip().upper()
-        for texto in descricoes:
-            # A celula traz o link "Ver envolvidos" grudado na descricao.
-            limpo = texto.upper().replace("VER ENVOLVIDOS", "").strip()
-            if limpo == alvo:
-                return True
-        return False
+        # A celula traz o link "Ver envolvidos" grudado na descricao.
+        return sum(1 for texto in descricoes
+                   if texto.upper().replace("VER ENVOLVIDOS", "").strip() == alvo)
 
     # --- preenchimento -------------------------------------------------------
 
@@ -366,6 +387,84 @@ class AutomadorLegalOne:
             By.CSS_SELECTOR, "input[id*='__EnvolvidoText']"
         ).get_attribute("value") == esperado)
 
+    def _preencher_descricao(self, descricao: str) -> None:
+        """Digita a descricao, repetindo se o formulario apagar o texto.
+
+        A descricao e o que identifica a tarefa depois — inclusive para a
+        checagem de duplicata. Se um caractere se perder, a tarefa nasce com o
+        texto errado e a rodada seguinte nao reconhece que ela ja existe.
+        """
+        escrito = ""
+        for _ in range(config.TENTATIVAS_DESCRICAO):
+            campo = self.wait.until(
+                EC.visibility_of_element_located((By.ID, "Descricao"))
+            )
+            campo.clear()
+            campo.send_keys(descricao)
+            # O apagao vem do script da pagina terminando de montar o
+            # formulario, um instante depois; conferir na hora nao pega.
+            time.sleep(config.DEBOUNCE_DELAY)
+            escrito = self.driver.find_element(By.ID, "Descricao").get_attribute("value")
+            if escrito == descricao:
+                return
+        raise RuntimeError(f"campo Descricao ficou {escrito!r}, esperava {descricao!r}")
+
+    def _fechar_aviso_pendo(self) -> bool:
+        """Fecha o aviso in-app do Legal One (Pendo), se houver um na tela.
+
+        O aviso fica no canto de baixo, por cima do Salvar, e volta a cada
+        pagina ate alguem dispensar. Em 16/09/2026 ele fez todo processo falhar
+        com o clique interceptado e o disjuntor disparar a cada reinicio. So
+        clica em botao de dispensa ("Ok, entendi" ou o X): o aviso tambem traz
+        botoes que abrem outras paginas.
+        """
+        return bool(self.driver.execute_script("""
+        // offsetParent nao serve: e null em elemento position:fixed, que e
+        // justamente como o aviso fica ancorado no canto da tela.
+        const visivel = e => e && e.getClientRects().length > 0
+          && getComputedStyle(e).visibility !== 'hidden';
+        for (const guia of document.querySelectorAll(
+            '#pendo-guide-container, ._pendo-step-container-styles')) {
+          if (!visivel(guia)) continue;
+          const botao = [...guia.querySelectorAll('button, ._pendo-close-guide')]
+            .find(b => visivel(b) && (b.classList.contains('_pendo-close-guide')
+                   || /^\\s*ok,?\\s*entendi\\s*$/i.test(b.innerText || '')));
+          if (botao) { botao.click(); return true; }
+        }
+        return false;
+        """))
+
+    def _esperar_mascara_sumir(self) -> None:
+        """Espera a mascara de carregamento dos lookups sair da frente do Salvar."""
+        with contextlib.suppress(TimeoutException):
+            self.wait.until(lambda d: not d.execute_script("""
+            return [...document.querySelectorAll('.modal-mask')]
+              .some(m => m.getClientRects().length > 0
+                         && getComputedStyle(m).visibility !== 'hidden');
+            """))
+
+    def _clicar_salvar(self) -> None:
+        botao = self.wait.until(EC.element_to_be_clickable((
+            By.XPATH, "//button[@name='ButtonSave' and @value='0']"
+        )))
+        self.driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});", botao
+        )
+        if self._fechar_aviso_pendo():
+            logger.info("Aviso do Legal One (Pendo) dispensado")
+        try:
+            botao.click()
+        except ElementClickInterceptedException:
+            # Clique interceptado nao chega ao botao, entao repetir nao grava
+            # duas vezes. Uma segunda chance so, depois de limpar a frente de
+            # novo: se ainda falhar, o processo vira erro como antes. A espera
+            # da mascara fica so aqui, e nao antes de todo clique, para nao
+            # pagar o timeout inteiro por processo se uma mascara ficar presa.
+            if self._fechar_aviso_pendo():
+                logger.info("Aviso do Legal One (Pendo) dispensado")
+            self._esperar_mascara_sumir()
+            botao.click()
+
     def _erros_de_validacao(self) -> str:
         return self.driver.execute_script("""
         return [...document.querySelectorAll(
@@ -384,20 +483,7 @@ class AutomadorLegalOne:
         perfil = perfil or self.perfil
         self._ir_para(config.URL_NOVA_TAREFA.format(id=id_legalone))
 
-        campo_desc = self.wait.until(
-            EC.visibility_of_element_located((By.ID, "Descricao"))
-        )
-        campo_desc.clear()
-        campo_desc.send_keys(perfil.descricao)
-
-        # A descricao e o que identifica a tarefa depois — inclusive para a
-        # checagem de duplicata. Se um caractere se perder, a tarefa nasce com o
-        # texto errado e a rodada seguinte nao reconhece que ela ja existe.
-        escrito = campo_desc.get_attribute("value")
-        if escrito != perfil.descricao:
-            raise RuntimeError(
-                f"campo Descricao ficou {escrito!r}, esperava {perfil.descricao!r}"
-            )
+        self._preencher_descricao(perfil.descricao)
 
         # Tipo e datas ja vem certos do formulario; confirmamos em vez de
         # reescrever, para nao desfazer o vinculo de TipoId.
@@ -422,21 +508,17 @@ class AutomadorLegalOne:
         if not executar:
             return "simulado (formulario preenchido, nao salvo)"
 
-        botao = self.wait.until(EC.element_to_be_clickable((
-            By.XPATH, "//button[@name='ButtonSave' and @value='0']"
-        )))
-        self.driver.execute_script(
-            "arguments[0].scrollIntoView({block: 'center'});", botao
-        )
-        botao.click()
+        self._clicar_salvar()
 
         # Sucesso = sai do formulario de criacao. Se continuar nele, a pagina
-        # tem o motivo da recusa.
+        # tem o motivo da recusa — ou o Salvar gravou e so a navegacao travou.
         try:
             self.wait.until(lambda d: "CreateFromProcesso" not in d.current_url)
         except TimeoutException:
             erros = self._erros_de_validacao()
-            raise RuntimeError(f"nao salvou: {erros or 'formulario nao avancou'}")
+            if erros:
+                raise RuntimeError(f"nao salvou: {erros}")
+            raise SalvarIncerto("nao salvou: formulario nao avancou")
 
         self._checar_sessao()
         return "cadastrada"

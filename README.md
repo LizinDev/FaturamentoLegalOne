@@ -269,9 +269,10 @@ Qualquer um desses arquivos pode ser refeito depois com `--relatorio`
 O formato aceito está no [manual](MANUAL.md#a-planilha-de-entrada). Três
 decisões por trás dele:
 
-A coluna da cobrança aceita **dois nomes**, `TIPO DE COBRANÇA` e `TAREFA`
-(`COLUNAS_TIPO_COBRANCA`, em `config.py`). Não é conveniência: as planilhas
-chegam de origens diferentes e a de 2022 batizou a coluna de `TAREFA`. Com um
+A coluna da cobrança aceita **três nomes**, `TIPO DE COBRANÇA`, `TAREFA` e
+`TAREFA PARA LANÇAR` (`COLUNAS_TIPO_COBRANCA`, em `config.py`). Não é
+conveniência: as planilhas chegam de origens diferentes — a de 2022 batizou a
+coluna de `TAREFA`, a de 2026 de `TAREFA PARA LANÇAR`. Com um
 nome só, aquela aba seria lida como se a coluna estivesse vazia — no modo auto
 todas as linhas seriam puladas em silêncio, e nos perfis fixos a trava de nome
 de arquivo deixaria passar a tarefa errada para as 1.108 linhas de defesa que o
@@ -392,7 +393,16 @@ Para os ~12 mil processos únicos da planilha, o fluxo completo fica na casa das
 
 ## Versão
 
-**1.6.0** — a coluna da cobrança passa a aceitar `TAREFA` além de
+**1.7.0** — correções das rodadas de 13 a 16/09/2026. O aviso in-app do Legal
+One (Pendo) é dispensado antes do Salvar, e um clique interceptado ganha uma
+segunda tentativa. A descrição é redigitada quando o formulário a apaga ao
+terminar de carregar (87 erros nessas rodadas). O Salvar que não confirma vira
+`SalvarIncerto` e guarda a contagem de tarefas de antes do clique, para o
+`--retentar` não duplicar o que já tinha gravado. Sessão expirada sai com código
+3, separado do disjuntor. A coluna `TAREFA PARA LANÇAR` (planilha de 2026) vale
+como cobrança. Os testes deixam de escrever no log de produção.
+
+1.6.0 — a coluna da cobrança passa a aceitar `TAREFA` além de
 `TIPO DE COBRANÇA`, para a planilha de 2022, que batizou a coluna assim. Sem
 isso a aba é lida como se a coluna estivesse vazia, e o modo auto pula tudo em
 silêncio. Some também a menção a uma cota diária de cadastros: o normal é rodar

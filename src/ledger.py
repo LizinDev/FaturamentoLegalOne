@@ -209,6 +209,18 @@ class Ledger:
         )
         self.con.commit()
 
+    def detalhe(self, cnj: str, tarefa: str) -> str:
+        """Detalhe gravado para o par, ou "" se ele nunca passou pela rodada.
+
+        A rodada le antes de reescrever: e ali que um Salvar incerto deixou
+        quantas tarefas havia antes do clique.
+        """
+        linha = self.con.execute(
+            "SELECT detalhe FROM processos WHERE cnj = ? AND tarefa = ?",
+            (cnj, tarefa),
+        ).fetchone()
+        return (linha[0] or "") if linha else ""
+
     def concluidos(self, tarefa: str) -> set[str]:
         """O que --retentar pula: as tarefas que nos cadastramos."""
         marcas = ",".join("?" * len(NOSSOS_CADASTROS))
