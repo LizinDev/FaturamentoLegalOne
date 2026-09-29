@@ -77,6 +77,55 @@ def test_erro_pode_virar_ok(registro):
     assert situacao_de(registro, CNJ, FATURAMENTO) == ledger_mod.OK
 
 
+TAREFA_ENVIADA = {"tipo": "Diversos", "status": "Cumprido",
+                  "responsavel": "Heloiza Helena de Araujo",
+                  "data_inicio": "29/09/2026", "data_fim": "29/09/2026"}
+
+
+def _campos_da_tarefa(registro, cnj, tarefa):
+    return dict(zip(ledger_mod.CAMPOS_DA_TAREFA, registro.con.execute(
+        f"SELECT {', '.join(ledger_mod.CAMPOS_DA_TAREFA)} FROM processos "
+        f"WHERE cnj = ? AND tarefa = ?", (cnj, tarefa),
+    ).fetchone(), strict=True))
+
+
+def test_grava_os_valores_da_tarefa_enviada(registro):
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.OK, "111", "cadastrada",
+                       **TAREFA_ENVIADA)
+
+    assert _campos_da_tarefa(registro, CNJ, FATURAMENTO) == TAREFA_ENVIADA
+
+
+def test_passada_que_falhou_nao_reescreve_a_tarefa_ja_criada(registro):
+    # A tarefa que existe no Legal One e a do cadastro; uma retentativa que
+    # falhou com outra data nao pode fazer o relatorio dizer outra coisa.
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.OK, "111", "cadastrada",
+                       **TAREFA_ENVIADA)
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.ERRO, detalhe="timeout",
+                       **{**TAREFA_ENVIADA, "data_inicio": "30/09/2026",
+                          "status": "Pendente"})
+
+    assert _campos_da_tarefa(registro, CNJ, FATURAMENTO) == TAREFA_ENVIADA
+
+
+def test_passada_sem_a_tarefa_nao_apaga_os_campos(registro):
+    # O "cadastro em andamento" grava a tarefa; a falha seguinte, se vier de um
+    # caminho que nao a conhece, nao pode esvaziar o que ficou.
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.ERRO,
+                       detalhe="cadastro em andamento", **TAREFA_ENVIADA)
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.ERRO, detalhe="timeout")
+
+    assert _campos_da_tarefa(registro, CNJ, FATURAMENTO) == TAREFA_ENVIADA
+
+
+def test_novo_cadastro_nosso_atualiza_a_tarefa(registro):
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.OK, **TAREFA_ENVIADA)
+    registro.registrar(CNJ, FATURAMENTO, ledger_mod.RECADASTRADA,
+                       **{**TAREFA_ENVIADA, "data_inicio": "30/09/2026"})
+
+    assert _campos_da_tarefa(registro, CNJ, FATURAMENTO)["data_inicio"] == "30/09/2026"
+
+
 def test_ja_existia_grava_normalmente_quando_nao_havia_ok(registro):
     registro.registrar(CNJ, FATURAMENTO, ledger_mod.JA_EXISTIA, "111", "ja tinha")
 
@@ -204,8 +253,8 @@ def test_cadastrados_em_filtra_por_dia_e_situacao(registro):
     linhas = registro.cadastrados_em("2026-07-30")
     assert [linha[0] for linha in linhas] == ["A", "D"]
     # A situacao vai junto: e o que marca a coluna "JA TINHA A TAREFA".
-    assert [linha[-1] for linha in linhas] == [ledger_mod.OK,
-                                               ledger_mod.RECADASTRADA]
+    assert [linha[7] for linha in linhas] == [ledger_mod.OK,
+                                              ledger_mod.RECADASTRADA]
     assert registro.dias_com_cadastro() == ["2026-07-31", "2026-07-30"]
 
 
@@ -229,6 +278,9 @@ def test_exportar_csv(registro, tmp_path):
     assert linhas[0][:4] == ["PROCESSO", "TAREFA", "SITUACAO", "ID_LEGALONE"]
     assert linhas[1][:6] == [CNJ, FATURAMENTO, "ok", "111", "cadastrada",
                              "ENCERRAMENTO"]
+    # Os campos da tarefa entram depois das colunas antigas, sem desloca-las.
+    assert linhas[0][9:] == ["TIPO_TAREFA", "STATUS_TAREFA", "RESPONSAVEL",
+                             "DATA_INICIO", "DATA_FIM"]
 
 
 # --- lista de conferencia manual ---------------------------------------------
@@ -402,6 +454,53 @@ def test_coluna_nova_entra_sem_recriar_a_tabela(tmp_path):
         assert "cnj_original" in colunas
         assert situacao_de(led, CNJ, FATURAMENTO) == ledger_mod.OK
         led.registrar(CNJ, FATURAMENTO, ledger_mod.OK, cnj_original="X")
+
+
+# Ledger da versao 1.7: com cnj_original, mas sem os campos da tarefa.
+ESQUEMA_V3 = ESQUEMA_V2.replace(
+    "quando          TEXT NOT NULL,",
+    "quando          TEXT NOT NULL,\n    cnj_original    TEXT,",
+)
+
+
+def test_historico_ganha_os_valores_das_duas_tarefas_antigas(tmp_path):
+    caminho = tmp_path / "ledger.sqlite3"
+    _criar_ledger_antigo(
+        caminho, ESQUEMA_V3,
+        (CNJ, DEFESA, "ok", "111", "cadastrada", "2026!L2", "DEFESA FATURADA",
+         "Ativo", "2026-09-10T20:21:01", CNJ),
+    )
+
+    with ledger_mod.Ledger(caminho) as led:
+        campos = _campos_da_tarefa(led, CNJ, DEFESA)
+        # Tudo o que foi cadastrado ate a 1.7 era Diversos / Cumprido / Heloiza.
+        assert campos == {**ledger_mod.VALORES_HISTORICOS,
+                          "data_inicio": None, "data_fim": None}
+
+        # Registro novo sem o dado nao e preenchido com o valor historico: ele
+        # so vale para o que existia quando a coluna nasceu.
+        led.registrar("NOVO", DEFESA, ledger_mod.NAO_ENCONTRADO)
+        assert not _campos_da_tarefa(led, "NOVO", DEFESA)["tipo"]
+
+    # Reabrir nao repete o preenchimento.
+    with ledger_mod.Ledger(caminho) as led:
+        assert not _campos_da_tarefa(led, "NOVO", DEFESA)["tipo"]
+
+
+@pytest.mark.parametrize("esquema, valores", [
+    (ESQUEMA_V0, (CNJ, "ok", "111", "cadastrada", "2026!L2", "2026-07-30T10:00:00")),
+    (ESQUEMA_V1, (CNJ, "ok", "111", "cadastrada", "2026!L2", "ENCERRAMENTO",
+                  "Ativo", "2026-07-30T10:00:00")),
+])
+def test_ledger_sem_chave_composta_tambem_ganha_o_historico(tmp_path, esquema,
+                                                             valores):
+    caminho = tmp_path / "ledger.sqlite3"
+    _criar_ledger_antigo(caminho, esquema, valores)
+
+    with ledger_mod.Ledger(caminho) as led:
+        campos = _campos_da_tarefa(led, CNJ, ledger_mod.TAREFA_HISTORICA)
+        historicos = {k: campos[k] for k in ledger_mod.VALORES_HISTORICOS}
+        assert historicos == ledger_mod.VALORES_HISTORICOS
 
 
 def test_migracao_e_idempotente(tmp_path):

@@ -484,6 +484,11 @@ sumirem em silêncio.
 Ficam em `PERFIS`, no fim de `src/config.py`. Para mudar responsável, status ou
 tipo, é lá.
 
+Mudar um perfil só afeta os cadastros **daqui para a frente**. Desde a 1.8 o
+ledger guarda o tipo, o status, o responsável e as datas de cada tarefa enviada,
+e é de lá que saem as planilhas do dia — refazer com `--relatorio` a planilha de
+um dia antigo continua mostrando o que foi cadastrado naquele dia.
+
 ```python
 PERFIS = {
     p.nome: p for p in [

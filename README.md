@@ -219,7 +219,9 @@ Excel):
 
 **`data/relatorio.csv`** — uma linha por processo já processado: número,
 situação, id no Legal One, detalhe, tipo de cobrança, status na planilha,
-origem e quando rodou.
+origem e quando rodou. No fim vêm os valores da tarefa enviada ao Legal One
+(`TIPO_TAREFA`, `STATUS_TAREFA`, `RESPONSAVEL`, `DATA_INICIO`, `DATA_FIM`) —
+depois das colunas antigas, para não deslocar quem lê o arquivo pela posição.
 
 **`data/nao_encontrados.csv`** — só o que precisa de conferência manual
 (`nao_encontrado` e `ambiguo`), ordenado pela posição na planilha. Sai do ledger,
@@ -248,8 +250,18 @@ automaticamente ao fim de toda rodada real que tenha cadastrado alguma coisa.
 Traz só os processos que *esta instalação cadastrou naquele dia*, com cabeçalho
 formatado, painel congelado e autofiltro. Colunas: processo, id no Legal One, os
 quatro valores da tarefa (descrição, status, tipo, responsável), tipo de
-cobrança, status na planilha, origem, o horário do cadastro e
-`JÁ TINHA A TAREFA` (`Sim` nos recadastros, vazio nos demais).
+cobrança, status na planilha, origem, o horário do cadastro,
+`JÁ TINHA A TAREFA` (`Sim` nos recadastros, vazio nos demais) e as datas de
+`INÍCIO` e `CONCLUSÃO` da tarefa.
+
+Status, tipo, responsável e datas saem do **ledger**, que guarda o que foi de
+fato enviado ao formulário — e não do perfil. Antes da versão 1.8 o ledger
+guardava só a descrição e a planilha reconstruía o resto pelo perfil; com
+tarefas que podem variar de uma rodada para outra, isso descreveria a tarefa
+de hoje, e não a que foi cadastrada. Os registros anteriores à 1.8 recebem
+Diversos / Cumprido / Heloiza na migração (eram os valores fixos de então), e
+ficam com as datas em branco: a rodada não as guardava, e deduzi-las do horário
+do cadastro erraria justamente nos cadastros feitos depois da meia-noite.
 
 Uma rodada que atravessa a meia-noite gera **as duas** planilhas, cada uma só com
 o que foi cadastrado naquele dia. Se as duas tarefas rodarem no mesmo dia, as

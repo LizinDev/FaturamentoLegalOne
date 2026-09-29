@@ -228,10 +228,13 @@ class Rodada:
                  perfil: config.PerfilTarefa, *, executar: bool = False,
                  so_buscar: bool = False, rapido: bool = False,
                  pular_existentes: bool = False,
-                 max_cadastros: int | None = None):
+                 max_cadastros: int | None = None,
+                 data_fixa: str | None = None):
         self.automador = automador
         self.registro = registro
         self.perfil = perfil
+        # --data. Sem ela, a data e a de hoje no instante de cada cadastro.
+        self.data_fixa = data_fixa
         self.executar = executar
         self.so_buscar = so_buscar
         self.rapido = rapido
@@ -259,6 +262,10 @@ class Rodada:
         # Tarefas iguais que o processo tinha antes do Salvar; None quando nao
         # houve contagem (--rapido) ou o processo nao chegou la.
         self._antes: int | None = None
+        # A tarefa enviada ao formulario do processo atual; None enquanto o
+        # processo nao chegou ao cadastro. E o que o ledger grava como tipo,
+        # status, responsavel e datas.
+        self._tarefa: config.Tarefa | None = None
 
     # --- laco ----------------------------------------------------------------
 
@@ -270,6 +277,7 @@ class Rodada:
             for i, proc in enumerate(fila, 1):
                 self._busca = None
                 self._antes = None
+                self._tarefa = None
                 try:
                     if not self._um_processo(proc, i, total):
                         break
@@ -331,6 +339,15 @@ class Rodada:
         """Perfil da tarefa deste processo — o da linha, ou o padrao da rodada."""
         return config.PERFIS_POR_DESCRICAO.get(proc.tarefa, self.perfil)
 
+    def _tarefa_de(self, proc: planilha.Processo) -> config.Tarefa:
+        """A tarefa a enviar para este processo, com a data resolvida agora.
+
+        Chamada logo antes do formulario, e nao no inicio da rodada: sem --data,
+        uma rodada que atravessa a meia-noite tem que mandar a data do dia novo.
+        """
+        data = self.data_fixa or datetime.date.today().strftime(FORMATO_DATA)
+        return config.Tarefa.do_perfil(self._perfil_de(proc), data)
+
     def _um_processo(self, proc: planilha.Processo, i: int, total: int) -> bool:
         """Trata um processo. Devolve False quando a rodada tem que parar."""
         if not self.automador.aba_viva():
@@ -389,9 +406,10 @@ class Rodada:
         andamento = "cadastro em andamento"
         if self._antes is not None:
             andamento += " " + MARCA_ANTES_DO_SALVAR.format(self._antes)
+        self._tarefa = tarefa = self._tarefa_de(proc)
         self._anotar(proc, ledger_mod.ERRO, busca.id_legalone, andamento)
         resultado = self.automador.cadastrar_tarefa(
-            busca.id_legalone, self.executar, perfil
+            busca.id_legalone, self.executar, tarefa
         )
         situacao = ledger_mod.RECADASTRADA if ja_existia else ledger_mod.OK
         detalhe = f"{resultado} (ja tinha a tarefa)" if ja_existia else resultado
@@ -471,10 +489,12 @@ class Rodada:
 
         Todo registro leva junto a origem na planilha: e o que preenche as
         colunas do relatorio e da planilha do dia, inclusive quando o processo
-        termina em erro.
+        termina em erro. Os campos da tarefa so vao quando o processo chegou ao
+        formulario; antes disso ficam vazios, e o ledger mantem o que ja tinha.
         """
         if not self.executar:
             return
+        tarefa = self._tarefa
         self.registro.registrar(
             proc.cnj, self._perfil_de(proc).descricao, situacao,
             id_legalone=id_legalone,
@@ -485,6 +505,11 @@ class Rodada:
             # Numero como estava escrito na planilha: e por ele que se acha a
             # linha de origem quando o processo cai na conferencia manual.
             cnj_original=proc.cnj_original,
+            tipo=tarefa.tipo if tarefa else "",
+            status=tarefa.status if tarefa else "",
+            responsavel=tarefa.responsavel_esperado if tarefa else "",
+            data_inicio=tarefa.inicio if tarefa else "",
+            data_fim=tarefa.fim if tarefa else "",
         )
 
     def _descartar_suspeitos(self) -> None:
@@ -722,7 +747,7 @@ def _modo_rodada(args: argparse.Namespace) -> int:
                          "no Legal One.", config.DEBUG_PORT)
             return SAIDA_ABORTADA
 
-        automador = legalone.AutomadorLegalOne(driver, args.data, perfil)
+        automador = legalone.AutomadorLegalOne(driver)
         automador.usar_aba_propria()
 
         rodada = Rodada(
@@ -732,6 +757,7 @@ def _modo_rodada(args: argparse.Namespace) -> int:
             rapido=args.rapido,
             pular_existentes=args.pular_existentes,
             max_cadastros=args.max_cadastros,
+            data_fixa=args.data,
         )
         try:
             rodada.executar_fila(fila)

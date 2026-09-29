@@ -86,6 +86,52 @@ class PerfilTarefa:
     dica_arquivo: str = ""
 
 
+@dataclasses.dataclass(frozen=True)
+class Tarefa:
+    """A tarefa concreta que vai para o formulario de um processo.
+
+    O perfil diz *qual* tarefa; a Tarefa junta a isso *quando*, com as datas
+    resolvidas no momento do cadastro. E ela que vai para o formulario e para o
+    ledger, para que o registro guarde exatamente o que foi enviado ao Legal
+    One, e nao o que o perfil diria no dia em que alguem for conferir.
+    """
+
+    descricao: str
+    tipo: str
+    status: str
+    responsavel_busca: str
+    responsavel_esperado: str
+    data_inicio: str                # DD/MM/AAAA
+    data_fim: str                   # DD/MM/AAAA
+    # None deixa a hora que o formulario sugere, que e a proxima hora cheia (as
+    # 13h13 ele traz 14h00-14h30). Hora passada no proprio dia e aceita: o Legal
+    # One so compara a data (testado em 29/09/2026).
+    hora_inicio: str | None = None  # HH:MM:SS
+    hora_fim: str | None = None
+
+    @classmethod
+    def do_perfil(cls, perfil: PerfilTarefa, data: str) -> "Tarefa":
+        """A tarefa de um perfil numa data, com inicio e fim no mesmo dia."""
+        return cls(
+            descricao=perfil.descricao,
+            tipo=perfil.tipo,
+            status=perfil.status,
+            responsavel_busca=perfil.responsavel_busca,
+            responsavel_esperado=perfil.responsavel_esperado,
+            data_inicio=data,
+            data_fim=data,
+        )
+
+    @property
+    def inicio(self) -> str:
+        """Data (e hora, se houver) de inicio, como vai para o ledger."""
+        return " ".join(filter(None, (self.data_inicio, self.hora_inicio)))
+
+    @property
+    def fim(self) -> str:
+        return " ".join(filter(None, (self.data_fim, self.hora_fim)))
+
+
 PERFIS = {
     p.nome: p for p in [
         PerfilTarefa("faturamento-final", "FATURAMENTO FINAL",
@@ -108,8 +154,8 @@ NOME_AUTO = "auto"
 PERFIL_AUTO = PerfilTarefa(NOME_AUTO, "(da coluna TIPO DE COBRANÇA)")
 
 # Descricao -> perfil. Serve para resolver a tarefa de uma linha da planilha no
-# modo auto e para reconstruir tipo/status/responsavel a partir do que ficou
-# gravado no ledger (que guarda so a descricao).
+# modo auto. Tipo, status e responsavel de um cadastro ja feito nao saem mais
+# daqui: o ledger guarda os valores que foram de fato enviados.
 PERFIS_POR_DESCRICAO = {p.descricao: p for p in PERFIS.values()}
 
 _DESCRICOES_POR_TIPO = {d.upper(): d for d in PERFIS_POR_DESCRICAO}
@@ -186,5 +232,5 @@ def planilha_do_dia(dia: str) -> str:
     return str(DATA_DIR / f"cadastrados_{dia}.xlsx")
 
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 PROJECT_NAME = "Cadastro de tarefas em lote - Legal One"

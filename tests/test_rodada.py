@@ -2,6 +2,7 @@
 
 Um automador falso no lugar do Selenium â€” nenhum teste aqui abre o Chrome.
 """
+import dataclasses
 import datetime
 import logging
 
@@ -46,6 +47,8 @@ class AutomadorFalso:
         # Descricao pedida em cada cadastro e em cada checagem de duplicata: e o
         # que prova de quem veio a tarefa, se da linha ou do perfil da rodada.
         self.tarefas: list[str] = []
+        # A Tarefa completa de cada chamada, inclusive as que falharam.
+        self.enviadas: list = []
         self.duplicatas_checadas: list[str] = []
         self.buscados: list[str] = []
         self.checagens_de_duplicata = 0
@@ -76,11 +79,14 @@ class AutomadorFalso:
             return self.contagens[id_legalone]
         return 1 if id_legalone in self.ja_existentes else 0
 
-    def cadastrar_tarefa(self, id_legalone, executar, perfil=None):
+    def cadastrar_tarefa(self, id_legalone, executar, tarefa):
+        # A tarefa fica anotada antes de uma falha simulada: quem falha depois
+        # do formulario ja recebeu a tarefa, e o ledger a grava.
+        self.enviadas.append(tarefa)
         if self.ao_cadastrar is not None:
             raise self.ao_cadastrar
         self.cadastrados.append((id_legalone, executar))
-        self.tarefas.append(perfil.descricao if perfil else None)
+        self.tarefas.append(tarefa.descricao)
         return "cadastrada" if executar else "simulado (formulario preenchido, nao salvo)"
 
 
@@ -650,3 +656,74 @@ def test_rapido_nao_confere_salvar_incerto(registro, perfil):
 
     assert automador.checagens_de_duplicata == 0
     assert automador.cadastrados == [("111", True)]
+
+
+# --- a tarefa enviada e a gravada --------------------------------------------
+
+def test_sem_data_fixa_a_tarefa_leva_a_data_de_hoje(registro, perfil):
+    automador = AutomadorFalso({CNJ: achou()})
+    rodada(automador, registro, perfil, executar=True).executar_fila([processo()])
+
+    hoje = datetime.date.today().strftime("%d/%m/%Y")
+    enviada = automador.enviadas[0]
+    assert (enviada.data_inicio, enviada.data_fim) == (hoje, hoje)
+    # Sem hora pedida, fica a que o formulario sugere.
+    assert (enviada.hora_inicio, enviada.hora_fim) == (None, None)
+
+
+def test_data_fixa_vale_para_inicio_e_fim(registro, perfil):
+    automador = AutomadorFalso({CNJ: achou()})
+    rodada(automador, registro, perfil, executar=True,
+           data_fixa="15/10/2026").executar_fila([processo()])
+
+    enviada = automador.enviadas[0]
+    assert (enviada.data_inicio, enviada.data_fim) == ("15/10/2026", "15/10/2026")
+
+
+def test_ledger_guarda_a_tarefa_que_foi_enviada(registro, perfil):
+    automador = AutomadorFalso({CNJ: achou()})
+    rodada(automador, registro, perfil, executar=True,
+           data_fixa="15/10/2026").executar_fila([processo()])
+
+    linha = registro.con.execute(
+        "SELECT tipo, status, responsavel, data_inicio, data_fim FROM processos "
+        "WHERE cnj = ?", (CNJ,)
+    ).fetchone()
+    assert linha == (perfil.tipo, perfil.status, perfil.responsavel_esperado,
+                     "15/10/2026", "15/10/2026")
+
+
+def test_erro_depois_do_formulario_guarda_a_tarefa_tentada(registro, perfil):
+    # E o que permite conferir no Legal One, depois, a tarefa que pode ter
+    # ficado gravada — inclusive a data que foi mandada.
+    automador = AutomadorFalso({CNJ: achou()},
+                               ao_cadastrar=RuntimeError("timeout"))
+    rodada(automador, registro, perfil, executar=True,
+           data_fixa="15/10/2026").executar_fila([processo()])
+
+    linha = registro.con.execute(
+        "SELECT situacao, data_inicio FROM processos WHERE cnj = ?", (CNJ,)
+    ).fetchone()
+    assert linha == (ledger_mod.ERRO, "15/10/2026")
+
+
+def test_nao_encontrado_nao_inventa_tarefa(registro, perfil):
+    # O processo nem chegou ao formulario: nao ha tarefa para registrar.
+    rodada(AutomadorFalso(), registro, perfil, executar=True).executar_fila(
+        [processo()])
+
+    linha = registro.con.execute(
+        "SELECT situacao, tipo, data_inicio FROM processos WHERE cnj = ?", (CNJ,)
+    ).fetchone()
+    assert linha[0] == ledger_mod.NAO_ENCONTRADO
+    assert not linha[1] and not linha[2]
+
+
+def test_tarefa_com_hora_junta_data_e_hora_no_ledger():
+    tarefa = config.Tarefa.do_perfil(config.PERFIS["defesa-faturada"], "15/10/2026")
+    assert (tarefa.inicio, tarefa.fim) == ("15/10/2026", "15/10/2026")
+
+    com_hora = dataclasses.replace(tarefa, hora_inicio="09:00:00",
+                                   hora_fim="09:30:00")
+    assert (com_hora.inicio, com_hora.fim) == ("15/10/2026 09:00:00",
+                                               "15/10/2026 09:30:00")

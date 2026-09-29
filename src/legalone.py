@@ -1,7 +1,6 @@
 """Automacao do Legal One: busca de processo e cadastro da tarefa."""
 import contextlib
 import dataclasses
-import datetime
 import logging
 import os
 import time
@@ -137,14 +136,16 @@ def conectar() -> webdriver.Chrome:
 
 
 class AutomadorLegalOne:
-    """Busca processos e cadastra a tarefa do perfil recebido."""
+    """Busca processos e cadastra a tarefa que receber em cada chamada.
 
-    def __init__(self, driver: webdriver.Chrome, data_tarefa: str | None,
-                 perfil: "config.PerfilTarefa"):
+    Nao guarda perfil nem data: quem decide a tarefa de cada processo e a
+    rodada, que tambem grava no ledger o que foi enviado. Com o automador
+    decidindo a data por conta propria, o ledger nao teria como saber qual foi.
+    """
+
+    def __init__(self, driver: webdriver.Chrome):
         self.driver = driver
         self.wait = WebDriverWait(driver, config.TIMEOUT_PADRAO)
-        self.data_tarefa = data_tarefa
-        self.perfil = perfil
         self._aba: str | None = None
 
     # --- infraestrutura ------------------------------------------------------
@@ -325,7 +326,11 @@ class AutomadorLegalOne:
     # --- preenchimento -------------------------------------------------------
 
     def _preencher_data(self, campo_id: str, data: str) -> None:
-        """O datepicker ignora eventos normais do Selenium; via JS funciona."""
+        """O datepicker ignora eventos normais do Selenium; via JS funciona.
+
+        Serve tambem para os campos de hora (HrInicio/HrFinal), que ficam
+        colados ao datepicker e sao lidos pelo mesmo evento de change.
+        """
         campo = self.wait.until(EC.visibility_of_element_located((By.ID, campo_id)))
         self.driver.execute_script("arguments[0].value = arguments[1];", campo, data)
         self.driver.execute_script(
@@ -473,32 +478,34 @@ class AutomadorLegalOne:
         """) or ""
 
     def cadastrar_tarefa(self, id_legalone: str, executar: bool,
-                         perfil: "config.PerfilTarefa | None" = None) -> str:
-        """Preenche o formulario da tarefa. So salva se executar=True.
+                         tarefa: "config.Tarefa") -> str:
+        """Preenche o formulario com a tarefa recebida. So salva se executar=True.
 
-        perfil sobrepoe o do automador — e assim que uma rodada unica cadastra
-        tarefas diferentes, uma por linha da planilha. Devolve uma descricao
-        curta do que foi feito.
+        Devolve uma descricao curta do que foi feito.
         """
-        perfil = perfil or self.perfil
         self._ir_para(config.URL_NOVA_TAREFA.format(id=id_legalone))
 
-        self._preencher_descricao(perfil.descricao)
+        self._preencher_descricao(tarefa.descricao)
 
-        # Tipo e datas ja vem certos do formulario; confirmamos em vez de
-        # reescrever, para nao desfazer o vinculo de TipoId.
+        # O tipo ja vem certo do formulario; confirmamos em vez de reescrever,
+        # para nao desfazer o vinculo de TipoId.
         tipo = self.driver.find_element(By.ID, "TipoText").get_attribute("value")
-        if tipo != perfil.tipo:
+        if tipo != tarefa.tipo:
             raise RuntimeError(
-                f"Tipo padrao mudou: esperava {perfil.tipo!r}, veio {tipo!r}"
+                f"Tipo padrao mudou: esperava {tarefa.tipo!r}, veio {tipo!r}"
             )
 
-        data_tarefa = self.data_tarefa or datetime.date.today().strftime("%d/%m/%Y")
-        self._preencher_data("DtInicial", data_tarefa)
-        self._preencher_data("DtFinal", data_tarefa)
-        self._selecionar_status(perfil.status)
+        self._preencher_data("DtInicial", tarefa.data_inicio)
+        self._preencher_data("DtFinal", tarefa.data_fim)
+        # Sem hora pedida, fica a que o formulario sugere — o comportamento de
+        # sempre. Hora so e escrita quando a tarefa traz uma.
+        if tarefa.hora_inicio:
+            self._preencher_data("HrInicio", tarefa.hora_inicio)
+        if tarefa.hora_fim:
+            self._preencher_data("HrFinal", tarefa.hora_fim)
+        self._selecionar_status(tarefa.status)
         self._preencher_responsavel(
-            perfil.responsavel_busca, perfil.responsavel_esperado
+            tarefa.responsavel_busca, tarefa.responsavel_esperado
         )
 
         erros = self._erros_de_validacao()

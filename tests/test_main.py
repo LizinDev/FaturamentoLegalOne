@@ -317,6 +317,31 @@ def test_planilha_do_dia_marca_o_recadastro(registro, dados_tmp):
     assert [ws["A3"].value, ws["K3"].value] == ["B", "Sim"]
 
 
+def test_planilha_do_dia_mostra_a_tarefa_gravada_no_ledger(registro, dados_tmp):
+    # Os valores saem do que foi enviado, e nao do perfil de hoje: uma tarefa
+    # Pendente com outro responsavel precisa aparecer assim, mesmo com a mesma
+    # descricao de um perfil que diz Cumprido/Heloiza.
+    registro.con.execute(
+        "INSERT INTO processos (cnj, tarefa, situacao, id_legalone, quando, "
+        "  tipo, status, responsavel, data_inicio, data_fim) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("A", "FATURAMENTO FINAL", ledger_mod.OK, "111", "2026-07-30T10:00:00",
+         "Diversos", "Pendente", "Fulana de Tal", "01/08/2026 09:00:00",
+         "01/08/2026 09:30:00"),
+    )
+    registro.con.commit()
+
+    main._exportar_finais(registro, dias=["2026-07-30"])
+
+    ws = load_workbook(dados_tmp / "cadastrados_2026-07-30.xlsx").active
+    assert [ws["D2"].value, ws["E2"].value, ws["F2"].value] == [
+        "Pendente", "Diversos", "Fulana de Tal"]
+    # As datas entram depois das colunas antigas, que nao mudam de lugar.
+    assert [ws["L1"].value, ws["M1"].value] == ["INÍCIO", "CONCLUSÃO"]
+    assert [ws["L2"].value, ws["M2"].value] == ["01/08/2026 09:00:00",
+                                                "01/08/2026 09:30:00"]
+
+
 # --- modo relatorio ponta a ponta --------------------------------------------
 
 def test_modo_relatorio_exporta_tudo(dados_tmp):
