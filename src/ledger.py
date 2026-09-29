@@ -90,6 +90,11 @@ TAREFA_HISTORICA = "FATURAMENTO FINAL"
 # um dia antigo refeita com --relatorio sairia com essas colunas em branco.
 # A data nao entra: a rodada nao a guardava, e chutar pela coluna `quando`
 # erraria justamente nos cadastros de depois da meia-noite.
+#
+# O preenchimento vale para NULL, e so NULL: e o que sobra numa linha gravada
+# por codigo anterior a 1.8, que nao conhece essas colunas. A 1.8 grava '' quando
+# nao sabe um valor. Por isso ele roda a cada abertura, e nao so quando a coluna
+# nasce — uma maquina ainda na 1.7 continua gravando no ledger ja migrado.
 VALORES_HISTORICOS = {
     "tipo": "Diversos",
     "status": "Cumprido",
@@ -129,6 +134,9 @@ class Ledger:
         self.con.execute(ESQUEMA_TABELA)
         for indice in ESQUEMA_INDICES:
             self.con.execute(indice)
+        if self._preencher_historico():
+            logger.info("Ledger: valores historicos dados a registros gravados "
+                        "por versao anterior a 1.8")
         self.con.commit()
 
     def _migrar(self) -> None:
@@ -197,17 +205,25 @@ class Ledger:
         try:
             for nome, tipo in faltando:
                 self.con.execute(f"ALTER TABLE processos ADD COLUMN {nome} {tipo}")
-                if nome in VALORES_HISTORICOS:
-                    self.con.execute(
-                        f"UPDATE processos SET {nome} = ?",
-                        (VALORES_HISTORICOS[nome],),
-                    )
+            self._preencher_historico()
         except Exception:
             self.con.rollback()
             raise
         self.con.commit()
         for nome, _ in faltando:
             logger.info("Ledger: coluna %r acrescentada", nome)
+
+    def _preencher_historico(self) -> int:
+        """Da os valores historicos as linhas gravadas por codigo pre-1.8.
+
+        Nao faz commit: quem chama decide a transacao. Ver VALORES_HISTORICOS.
+        """
+        preenchidas = 0
+        for nome, valor in VALORES_HISTORICOS.items():
+            preenchidas += self.con.execute(
+                f"UPDATE processos SET {nome} = ? WHERE {nome} IS NULL", (valor,)
+            ).rowcount
+        return preenchidas
 
     def registrar(
         self,

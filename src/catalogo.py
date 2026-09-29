@@ -33,6 +33,33 @@ class Tipo:
     pai: str | None = None  # id do tipo pai, para expandir a arvore
 
 
+@dataclasses.dataclass
+class Resolucao:
+    """O que cada tipo e responsavel pedidos viraram no Legal One.
+
+    Indexada pelo valor pedido, e nao pelo perfil: no modo planilha a mesma
+    descricao pode ir para responsaveis diferentes em processos diferentes, e
+    cada valor distinto so precisa ser conferido uma vez.
+    """
+
+    tipos: dict[str, Tipo] = dataclasses.field(default_factory=dict)
+    responsaveis: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def aplicar(self, perfil):
+        """O perfil com tipo e responsavel escritos como o Legal One os escreve.
+
+        Valor que nao passou pela conferencia fica como veio, sem tipo_id: o
+        formulario entao so confere o tipo que ja vem nele, e nunca escolhe um
+        tipo que ninguem conferiu.
+        """
+        tipo = self.tipos.get(perfil.tipo)
+        nome = self.responsaveis.get(perfil.responsavel, perfil.responsavel)
+        if tipo is None:
+            return dataclasses.replace(perfil, responsavel=nome)
+        return dataclasses.replace(perfil, tipo=tipo.caminho, tipo_id=tipo.id,
+                                   responsavel=nome)
+
+
 def normalizar(texto: str) -> str:
     """Forma de comparacao: sem acento, sem caixa, com espacos colapsados.
 

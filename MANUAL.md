@@ -213,13 +213,69 @@ rodando a planilha inteira em vez de parar na hora.
 
 **`--tarefa PERFIL`**
 
-Escolhe qual tarefa cadastrar. O perfil define a descrição gravada:
+Escolhe qual tarefa cadastrar. Sem `--tarefa` (e sem `--descricao`), vale
+`faturamento-final`.
 
-| Perfil | Descrição gravada |
+| `--tarefa` | A tarefa |
 | --- | --- |
-| `faturamento-final` | `FATURAMENTO FINAL` |
-| `defesa-faturada` | `DEFESA FATURADA` |
+| `faturamento-final` | `FATURAMENTO FINAL`, do `tarefas.toml` |
+| `defesa-faturada` | `DEFESA FATURADA`, do `tarefas.toml` |
+| outro perfil do `tarefas.toml` | a daquela seção (ver [Perfis de tarefa](#perfis-de-tarefa)) |
 | `auto` | a que a coluna `TIPO DE COBRANÇA` disser, linha a linha |
+| `planilha` | a das colunas `... DA TAREFA` de cada linha (ver abaixo) |
+
+**`--descricao TEXTO`**, **`--tipo`**, **`--status`**, **`--responsavel`**
+
+`--descricao` cadastra uma tarefa **avulsa**, que não está no `tarefas.toml`, e
+exige `--status` e `--responsavel` (sem eles, código 2). `--tipo` é opcional e
+vale `Diversos`. Não combina com `--tarefa`.
+
+```powershell
+python main.py --planilha "..." --descricao "CONFERIR CUSTAS" --tipo "Diversos" --status Pendente --responsavel "Nathalia Maria Gatto Pinto"
+```
+
+Com um perfil, `--tipo`, `--status` e `--responsavel` sobrepõem o perfil **só
+nesta rodada** — a descrição e a trava de nome de arquivo continuam as do
+perfil. Com `--tarefa auto`, valem para todos os perfis da planilha.
+
+```powershell
+python main.py --planilha "..\Defesa.xlsx" --tarefa defesa-faturada --responsavel "Nathalia Maria Gatto Pinto"
+```
+
+`--status` aceita sem acento e em qualquer caixa (`nao cumprido`). O tipo e o
+responsável são escritos como em [Perfis de tarefa](#perfis-de-tarefa), e
+conferidos no Legal One antes do primeiro cadastro.
+
+**`--tarefa planilha`**
+
+A tarefa inteira sai de cada linha, pelas colunas:
+
+| Coluna | Na linha vazia, vale |
+| --- | --- |
+| `DESCRIÇÃO DA TAREFA` | obrigatória — linha sem ela é pulada, com aviso |
+| `TIPO DA TAREFA` | `--tipo`; senão o perfil de mesma descrição; senão `Diversos` |
+| `STATUS DA TAREFA` | `--status`; senão o perfil de mesma descrição |
+| `RESPONSÁVEL DA TAREFA` | `--responsavel`; senão o perfil de mesma descrição |
+
+Se a descrição de uma linha for a de um perfil do `tarefas.toml` (sem ligar
+para caixa e espaços), o perfil completa o que a linha e as flags não disserem,
+e a descrição passa a ser escrita como no perfil. Linha que termina sem status
+ou sem responsável — nem na coluna, nem na flag, nem no perfil — encerra com
+código 2 antes de abrir o Chrome, listando aba e linha.
+
+O cabeçalho da rodada mostra cada combinação distinta e quantos processos a
+pedem. **Confira antes de `--executar`**: é ali que aparece uma coluna de
+responsável trocada ou um status errado na planilha inteira.
+
+```
+Tarefa:      'CONFERIR CUSTAS' / tipo 'Diversos' / status 'Pendente' / responsavel 'nathalia': 212 processo(s)
+Tarefa:      'FATURAMENTO FINAL' / tipo 'Diversos' / status 'Cumprido' / responsavel 'Heloiza Helena de Araujo': 40 processo(s)
+```
+
+O mesmo processo pode pedir tarefas diferentes em linhas diferentes. Mas a
+mesma tarefa (mesma descrição) no mesmo processo, com tipo, status ou
+responsável diferentes entre as linhas, encerra com código 2 — o ledger guarda
+um cadastro por par (processo, descrição).
 
 Tipo (`Diversos`), status (`Cumprido`) e responsável (`Heloiza Helena de
 Araujo`) são iguais nos dois. O ledger é indexado por **(processo, tarefa)**, de
@@ -460,6 +516,7 @@ Aba sem essa coluna é ignorada com um aviso, e não derruba a leitura.
 | `PROCESSO` | sim | O número CNJ a buscar |
 | `TIPO DE COBRANÇA`, `TAREFA` **ou** `TAREFA PARA LANÇAR` | não | Filtro `--tipo-contem`, coluna dos relatórios e, com `--tarefa auto`, a tarefa daquela linha |
 | `STATUS LEGAL ONE` | não | Filtro `--status-planilha` e coluna dos relatórios |
+| `DESCRIÇÃO DA TAREFA`, `TIPO DA TAREFA`, `STATUS DA TAREFA`, `RESPONSÁVEL DA TAREFA` | só com `--tarefa planilha` | A tarefa de cada linha. Fora desse modo são ignoradas |
 
 **A coluna da cobrança tem três nomes aceitos.** As planilhas antigas trazem
 `TIPO DE COBRANÇA`; a de 2022 e a de 2025 trazem `TAREFA`; a de 2026 traz
@@ -489,42 +546,58 @@ sumirem em silêncio.
 
 ## Perfis de tarefa
 
-Ficam em `PERFIS`, no fim de `src/config.py`. Para mudar responsável, status ou
-tipo, é lá.
+Ficam no **`tarefas.toml`**, na raiz do projeto — uma seção por perfil, e o
+nome da seção é o que se escreve em `--tarefa`. Para criar uma tarefa
+recorrente ou mudar responsável, status ou tipo de uma existente, é lá; não é
+preciso mexer em Python.
+
+```toml
+[defesa-faturada]
+descricao = "DEFESA FATURADA"
+tipo = "Diversos"
+status = "Cumprido"
+responsavel = "Heloiza Helena de Araujo"
+dica_arquivo = "Defesa"
+
+[conferir-custas]
+descricao = "CONFERIR CUSTAS"
+tipo = "Diversos / Contato Telefônico"
+status = "Pendente"
+responsavel = "Nathalia Maria Gatto Pinto"
+```
+
+`descricao`, `tipo`, `status` e `responsavel` são obrigatórios; `dica_arquivo` é
+opcional. Campo que falta, campo desconhecido (`responsável` com acento, por
+exemplo), status que não existe, duas seções com a mesma descrição ou uma seção
+chamada `auto`, `planilha` ou `avulsa` fazem **toda rodada** terminar com código
+2, com a lista dos problemas — `--help` e `--relatorio` continuam funcionando.
 
 Mudar um perfil só afeta os cadastros **daqui para a frente**. Desde a 1.8 o
 ledger guarda o tipo, o status, o responsável e as datas de cada tarefa enviada,
 e é de lá que saem as planilhas do dia — refazer com `--relatorio` a planilha de
 um dia antigo continua mostrando o que foi cadastrado naquele dia.
 
-```python
-PERFIS = {
-    p.nome: p for p in [
-        PerfilTarefa("faturamento-final", "FATURAMENTO FINAL",
-                     dica_arquivo="Faturamento"),
-        PerfilTarefa("defesa-faturada", "DEFESA FATURADA",
-                     dica_arquivo="Defesa"),
-    ]
-}
-```
-
 Os campos de um perfil:
 
-| Campo | Padrão | Como escrever |
-| --- | --- | --- |
-| `descricao` | — | O texto gravado no campo Descrição; identifica a tarefa na checagem de duplicata e no ledger |
-| `tipo` | `Diversos` | O caminho na árvore de tipos do Legal One: `"Diversos"` para um tipo, `"Diversos / Contato Telefônico"` para um subtipo. `>` também serve de separador. O nome sozinho (`"Contato Telefônico"`) vale enquanto for único na árvore |
-| `status` | `Cumprido` | Um dos seis do Legal One: Pendente, Cumprido, Não cumprido, Cancelado, Iniciado, Recusado |
-| `responsavel` | `Heloiza Helena de Araujo` | Um usuário **ativo** do Legal One. Acento e maiúsculas não importam, e basta parte do nome enquanto só um usuário casar |
-| `dica_arquivo` | vazio | Ver abaixo |
+| Campo | Como escrever |
+| --- | --- |
+| `descricao` | O texto gravado no campo Descrição; identifica a tarefa na checagem de duplicata e no ledger — trocar a descrição de um perfil faz as rodadas seguintes a tratarem como outra tarefa |
+| `tipo` | O caminho na árvore de tipos do Legal One: `"Diversos"` para um tipo, `"Diversos / Contato Telefônico"` para um subtipo. `>` também serve de separador. O nome sozinho (`"Contato Telefônico"`) vale enquanto for único na árvore |
+| `status` | Um dos seis do Legal One: Pendente, Cumprido, Não cumprido, Cancelado, Iniciado, Recusado. Acento e maiúsculas não importam |
+| `responsavel` | Um usuário **ativo** do Legal One. Acento e maiúsculas não importam, e basta parte do nome enquanto só um usuário casar |
+| `dica_arquivo` | Opcional. Ver abaixo |
+
+As mesmas regras de escrita valem para `--tipo`, `--status` e `--responsavel`
+e para as colunas do modo planilha.
 
 **O tipo e o responsável são conferidos no Legal One antes do primeiro
 cadastro.** Logo depois de conectar no Chrome, a rodada busca a árvore de tipos
-e os usuários e casa cada perfil da rodada (no modo auto, todos). O log mostra o
-resultado:
+e os usuários e casa cada tipo e cada responsável distintos da fila — venham do
+arquivo, das flags ou da planilha —, uma vez cada. O log mostra o resultado:
 
 ```
-Conferido:   'DEFESA FATURADA' -> tipo 'Diversos' (tipo_4), responsavel 'Heloiza Helena de Araujo'
+Conferido:   tipo 'Diversos > Contato Telefonico' -> 'Diversos / Contato Telefônico' (subtipo_9)
+Conferido:   responsavel 'nathalia' -> 'Nathalia Maria Gatto Pinto'
 ```
 
 Se um tipo não existe, se o nome do tipo aparece sob mais de um pai
@@ -534,8 +607,8 @@ que existe:
 
 ```
 Tarefa que nao da para cadastrar no Legal One:
-  TAREFA X: tipo 'Prazos / Apelacao' nao existe no Legal One. Parecidos: '[Cível] Prazos / Apelação'; ...
-  TAREFA Y: responsavel 'Ana' casa com mais de um usuario; escreva o nome completo: 'Ana Clara Stroparo'; ...
+  tipo 'Prazos / Apelacao' nao existe no Legal One. Parecidos: '[Cível] Prazos / Apelação'; ... [em 'TAREFA X']
+  responsavel 'Ana' casa com mais de um usuario; escreva o nome completo: 'Ana Clara Stroparo'; ... [em 'TAREFA Y']
 ```
 
 Nunca se escolhe um "mais parecido": errar o tipo ou a pessoa criaria centenas
@@ -554,8 +627,8 @@ trava contra parear a planilha de uma tarefa com o perfil da outra. Se os
 arquivos mudarem de nome, é este campo que se ajusta; deixá-lo vazio desliga a
 conferência daquele perfil.
 
-`--tarefa auto` não é um perfil a mais nessa lista: ele escolhe, para cada
-linha, um dos perfis acima. O casamento é pela descrição — acrescentar um perfil
+`--tarefa auto` não é um perfil a mais no arquivo: ele escolhe, para cada
+linha, um dos perfis do arquivo. O casamento é pela descrição — acrescentar um perfil
 novo já o torna disponível no modo auto, com o texto da coluna
 `TIPO DE COBRANÇA` tendo que ser igual à descrição.
 

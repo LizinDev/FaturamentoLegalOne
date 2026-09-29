@@ -523,3 +523,28 @@ def test_ledger_novo_nao_dispara_migracao(tmp_path, caplog):
         pass
 
     assert "Migrando ledger" not in caplog.text
+
+
+def test_registro_da_17_no_ledger_ja_migrado_ganha_o_historico(tmp_path):
+    # Uma maquina ainda na 1.7 grava no ledger que a 1.8 ja migrou: o INSERT
+    # dela nao conhece as colunas novas e as deixa NULL. A proxima abertura pela
+    # 1.8 tem que preencher, senao o relatorio sai em branco para sempre.
+    caminho = tmp_path / "ledger.sqlite3"
+    with ledger_mod.Ledger(caminho):
+        pass
+    con = sqlite3.connect(caminho)
+    con.execute(
+        "INSERT INTO processos (cnj, tarefa, situacao, quando) VALUES (?,?,?,?)",
+        (CNJ, DEFESA, "ok", "2026-09-30T10:00:00"),
+    )
+    con.commit()
+    con.close()
+
+    with ledger_mod.Ledger(caminho) as led:
+        campos = _campos_da_tarefa(led, CNJ, DEFESA)
+        assert {k: campos[k] for k in ledger_mod.VALORES_HISTORICOS} == \
+            ledger_mod.VALORES_HISTORICOS
+        # A 1.8 grava '' quando nao sabe; isso nao e historico e fica como esta.
+        led.registrar("NOVO", DEFESA, ledger_mod.NAO_ENCONTRADO)
+    with ledger_mod.Ledger(caminho) as led:
+        assert _campos_da_tarefa(led, "NOVO", DEFESA)["tipo"] == ""

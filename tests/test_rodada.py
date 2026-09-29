@@ -49,7 +49,8 @@ ARVORE = catalogo.tipos_da_arvore([
 ])
 
 USUARIOS = ["Heloiza Helena de Araujo", "Ana Clara Stroparo",
-            "Ana Luiza Saitone Costa"]
+            "Ana Luiza Saitone Costa", "Pedro Henrique Braz Moreira",
+            "Nathalia Maria Gatto Pinto"]
 
 
 class AutomadorFalso:

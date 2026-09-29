@@ -5,3 +5,6 @@ selenium==4.41.0
 
 # Leitura da planilha de cobrancas (.xlsx)
 openpyxl==3.1.5
+
+# Leitura do tarefas.toml no Python 3.10 (da 3.11 em diante e o tomllib nativo)
+tomli==2.2.1; python_version < "3.11"

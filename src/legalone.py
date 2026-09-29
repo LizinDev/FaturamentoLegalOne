@@ -544,7 +544,13 @@ class AutomadorLegalOne:
         navegador que esta logada. Por isso a aba precisa estar no Legal One.
         """
         if not self.driver.current_url.startswith(config.BASE_URL):
-            self._ir_para(config.BASE_URL)
+            # Nao a raiz: ela redireciona para firm.legalone.com.br/home, outro
+            # dominio, e o fetch dali pedia a lista ao host errado (voltava a
+            # pagina HTML dele). A busca de processos fica no novajus.
+            self._ir_para(config.URL_BUSCA.format(cnj=""))
+        # URL absoluta: se mesmo assim a aba estiver noutro dominio, o fetch
+        # falha como cross-origin, em vez de responder a pagina de outro site.
+        caminho = config.BASE_URL + caminho
         resposta = self.driver.execute_async_script("""
         const [url, fim] = arguments;
         fetch(url, {credentials: 'same-origin',

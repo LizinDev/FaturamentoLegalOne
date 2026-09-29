@@ -4,32 +4,61 @@ Cadastra tarefas em lote nos processos listados numa planilha de cobranças,
 direto no Legal One (`hasson.novajus.com.br`), via Selenium.
 
 Para cada linha da planilha o programa busca o processo pelo número CNJ, abre o
-formulário de nova tarefa e preenche os valores do perfil escolhido.
+formulário de nova tarefa e preenche descrição, tipo, status, responsável e
+data da tarefa daquele processo.
 
 > Para operar no dia a dia — todas as flags, códigos de saída e o que fazer
 > quando algo dá errado —, veja o **[Manual de operação](MANUAL.md)**. Este
 > README explica as decisões de projeto por trás do comportamento.
 
-São **duas tarefas**, e três formas de dizer qual cadastrar:
+A tarefa pode vir de quatro lugares:
 
-| Perfil (`--tarefa`) | Descrição gravada | Exige no nome da planilha |
-| --- | --- | --- |
-| `faturamento-final` | `FATURAMENTO FINAL` | `Faturamento` |
-| `defesa-faturada` | `DEFESA FATURADA` | `Defesa` |
-| `auto` | a que a coluna `TIPO DE COBRANÇA` disser, linha a linha | — |
-
-O resto é igual nos dois:
-
-| Campo | Valor |
+| Como | De onde vem a tarefa |
 | --- | --- |
-| Tipo | `Diversos` |
-| Status | `Cumprido` |
-| Responsável | `Heloiza Helena de Araujo` |
-| Data (início e fim) | hoje (ou `--data`) |
+| `--tarefa PERFIL` | Um perfil do `tarefas.toml` (hoje `faturamento-final` e `defesa-faturada`) |
+| `--descricao "..."` | A própria linha de comando: uma tarefa avulsa, fora do arquivo |
+| `--tarefa auto` | O perfil que a coluna `TIPO DE COBRANÇA` de cada linha indicar |
+| `--tarefa planilha` | As colunas `DESCRIÇÃO DA TAREFA`, `TIPO DA TAREFA`, `STATUS DA TAREFA` e `RESPONSÁVEL DA TAREFA` de cada linha |
 
-Os perfis ficam em `PERFIS`, em `src/config.py`. São nomeados em vez de texto
-livre na linha de comando porque parear a planilha de uma tarefa com a descrição
-da outra criaria centenas de tarefas indevidas.
+`--tipo`, `--status` e `--responsavel` sobrepõem o perfil só naquela rodada. No
+modo planilha a ordem é **linha > flag > perfil**: a coluna da linha vale
+primeiro, a flag completa a coluna vazia, e se a descrição for a de um perfil do
+arquivo ele completa o resto.
+
+Os dois perfis de produção têm os valores de sempre:
+
+| Perfil | Descrição | Tipo | Status | Responsável | Exige no nome da planilha |
+| --- | --- | --- | --- | --- | --- |
+| `faturamento-final` | `FATURAMENTO FINAL` | `Diversos` | `Cumprido` | `Heloiza Helena de Araujo` | `Faturamento` |
+| `defesa-faturada` | `DEFESA FATURADA` | `Diversos` | `Cumprido` | `Heloiza Helena de Araujo` | `Defesa` |
+
+### Por que perfis num arquivo, e por que exigir tanto
+
+Os perfis ficam no `tarefas.toml`, na raiz do repositório, e não no código:
+uma tarefa recorrente nova é uma seção a mais num texto, e o arquivo versionado
+faz as duas máquinas cadastrarem exatamente a mesma coisa. Tipo, status e
+responsável são **obrigatórios** em cada perfil, e chave desconhecida é erro —
+`responsável` com acento, digitado à mão, seria ignorado em silêncio e o perfil
+cairia num padrão que ninguém escolheu. Arquivo com problema vira código 2
+antes de a rodada começar.
+
+Pela mesma razão, a tarefa avulsa (`--descricao`) **exige** `--status` e
+`--responsavel`: uma tarefa nova que caísse em Cumprido e no nome da Heloiza
+por esquecimento passaria por certa.
+
+As colunas do modo planilha levam o sufixo `DA TAREFA` de propósito, e o modo
+só liga com `--tarefa planilha`. Planilha jurídica costuma ter uma coluna
+`RESPONSÁVEL` (o advogado do caso) ou `STATUS` (o do processo), e nenhuma delas
+pode mudar a tarefa sem alguém pedir. No mesmo espírito, o mesmo par (processo,
+descrição) com tipo, status ou responsável diferentes em duas linhas é erro de
+uso: o ledger guarda um cadastro por par, e ficar com um dos dois seria chute.
+
+Um perfil nomeado exige um trecho no nome do arquivo (`dica_arquivo`): se você
+mandar a planilha de defesas com `--tarefa faturamento-final`, a rodada é
+abortada antes de começar. Quando o par estiver certo mas o arquivo não seguir
+a convenção de nome, `--forcar-planilha` passa por cima. Tarefa avulsa e os
+modos auto e planilha não têm essa trava — nos dois últimos a garantia vem da
+própria célula de cada linha.
 
 Tipo e responsável de um perfil podem ser quaisquer que existam no Legal One —
 o tipo pelo caminho na árvore (`"Diversos / Contato Telefônico"`), o responsável
@@ -41,11 +70,6 @@ tem nomes repetidos sob pais diferentes ("Audiência" aparece em mais de dez
 lugares) e nomes que já contêm barra ("Agravo em REsp / Rext"), por isso o
 casamento é sempre pelo caminho inteiro. Detalhes no
 [Manual](MANUAL.md#perfis-de-tarefa).
-
-Pela mesma razão cada perfil exige um trecho no nome do arquivo (`dica_arquivo`):
-se você mandar a planilha de defesas com `--tarefa faturamento-final`, a rodada
-é abortada antes de começar. Quando o par estiver certo mas o arquivo não seguir
-a convenção de nome, `--forcar-planilha` passa por cima.
 
 ### `--tarefa auto`
 
@@ -329,12 +353,14 @@ em vez de sumirem em silêncio.
 ```
 src/
 ├── main.py       # CLI, laço principal (classe Rodada), progresso e ETA
-├── config.py     # URLs, seletores, valores da tarefa e timeouts
+├── config.py     # URLs, seletores, leitura do tarefas.toml e timeouts
+├── catalogo.py   # casa tipo e responsável pedidos com o Legal One
 ├── planilha.py   # leitura do .xlsx -> lista de processos únicos
 ├── legalone.py   # Selenium: busca o processo e cadastra a tarefa
 ├── ledger.py     # checkpoint em SQLite + exportação dos CSVs
 └── relatorio.py  # planilha Excel do dia (a que vai para o supervisor)
 
+tarefas.toml      # perfis de tarefa (--tarefa)
 tests/            # pytest — nenhum teste abre o Chrome
 .github/          # CI, análise de dependências e Dependabot
 ```

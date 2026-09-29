@@ -4,7 +4,13 @@ import dataclasses
 import logging
 import os
 import sys
+import unicodedata
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10: o tomllib so entrou na 3.11
+    import tomli as tomllib
 
 # O console do Windows costuma abrir em cp1252 e os logs tem acento ("Nao
 # cumprido", nomes de cliente). Sem isto, um UnicodeEncodeError dentro do
@@ -67,10 +73,10 @@ TIPO_ACEITO = "Processo"
 class PerfilTarefa:
     """Tudo que define uma das tarefas cadastradas em lote.
 
-    Cada planilha tem o seu perfil. Sao perfis nomeados, e nao um texto livre
-    na linha de comando, porque parear a planilha errada com a tarefa errada
-    criaria centenas de tarefas indevidas — e o nome do perfil e conferido
-    contra a lista abaixo antes de qualquer coisa acontecer.
+    Os de producao vem do tarefas.toml (ver carregar_perfis), com todos os
+    campos escritos por extenso. Os padroes abaixo so servem a quem monta um
+    perfil no codigo — os testes e a tarefa avulsa, que exige status e
+    responsavel na linha de comando antes de chegar aqui.
     """
 
     nome: str               # como se escreve em --tarefa
@@ -145,30 +151,146 @@ class Tarefa:
         return " ".join(filter(None, (self.data_fim, self.hora_fim)))
 
 
-PERFIS = {
-    p.nome: p for p in [
-        PerfilTarefa("faturamento-final", "FATURAMENTO FINAL",
-                     dica_arquivo="Faturamento"),
-        PerfilTarefa("defesa-faturada", "DEFESA FATURADA",
-                     dica_arquivo="Defesa"),
-    ]
+# "Nao cumprido" contem "Cumprido": o casamento no lookup precisa ser exato.
+STATUS_VALIDOS = {
+    "Pendente": "0",
+    "Cumprido": "1",
+    "Não cumprido": "2",
+    "Cancelado": "3",
+    "Iniciado": "4",
+    "Recusado": "5",
 }
 
-PERFIL_PADRAO = "faturamento-final"
+
+def _sem_acento(texto: str) -> str:
+    texto = unicodedata.normalize("NFKD", str(texto))
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return " ".join(texto.split()).casefold()
+
+
+_STATUS_POR_FORMA = {_sem_acento(s): s for s in STATUS_VALIDOS}
+
+
+def status_canonico(texto: str) -> str | None:
+    """O status como o Legal One o escreve, ou None se nao for um dos seis.
+
+    Aceita sem acento e em qualquer caixa ("nao cumprido"), porque vem de
+    planilha, de linha de comando e do tarefas.toml. O que sai daqui e o texto
+    exato que o lookup de status precisa.
+    """
+    return _STATUS_POR_FORMA.get(_sem_acento(texto))
+
 
 # Modo em que a tarefa de cada processo sai da coluna TIPO DE COBRANCA, linha a
 # linha, em vez de valer uma so para a rodada inteira. E para a planilha que
 # mistura as duas tarefas na mesma aba.
 NOME_AUTO = "auto"
+# Modo em que a tarefa inteira (descricao, tipo, status, responsavel) sai das
+# colunas "... DA TAREFA" de cada linha. Ver COLUNAS_DA_TAREFA.
+NOME_PLANILHA = "planilha"
+# A tarefa de --descricao, sem perfil do arquivo.
+NOME_AVULSA = "avulsa"
+NOMES_RESERVADOS = {NOME_AUTO, NOME_PLANILHA, NOME_AVULSA}
 
 # Aqui nao ha trava de nome de arquivo, e de proposito: a garantia de nao parear
 # planilha errada com tarefa errada vem da propria celula de cada linha, que e
 # mais forte do que o nome do arquivo.
 PERFIL_AUTO = PerfilTarefa(NOME_AUTO, "(da coluna TIPO DE COBRANÇA)")
+PERFIL_PLANILHA = PerfilTarefa(NOME_PLANILHA, "(da coluna DESCRIÇÃO DA TAREFA)")
+
+# --- Arquivo de perfis -------------------------------------------------------
+
+# Os perfis ficam num arquivo, e nao no codigo, para que uma tarefa nova seja
+# uma secao a mais num texto — sem editar Python. Fica no repositorio, e nao
+# fora dele, para as duas maquinas cadastrarem exatamente a mesma coisa.
+ARQUIVO_PERFIS = BASE_DIR / "tarefas.toml"
+
+_OBRIGATORIOS = ("descricao", "tipo", "status", "responsavel")
+_OPCIONAIS = ("dica_arquivo",)
+
+
+class ErroPerfis(ValueError):
+    """O tarefas.toml nao descreve perfis validos."""
+
+
+def carregar_perfis(caminho: str | Path) -> dict[str, PerfilTarefa]:
+    """Le e valida os perfis do arquivo TOML.
+
+    Tipo, status e responsavel sao obrigatorios em todo perfil do arquivo:
+    padrao escondido no codigo e como uma tarefa nova acaba no nome de quem
+    ninguem escolheu. Chave desconhecida tambem e erro — "responsável" com
+    acento, digitado a mao, seria ignorada em silencio e o perfil sairia sem
+    responsavel.
+    """
+    try:
+        with open(caminho, "rb") as f:
+            bruto = tomllib.load(f)
+    except FileNotFoundError:
+        raise ErroPerfis(f"arquivo de perfis nao encontrado: {caminho}")
+    except tomllib.TOMLDecodeError as e:
+        raise ErroPerfis(f"{caminho} nao e um TOML valido: {e}")
+
+    perfis: dict[str, PerfilTarefa] = {}
+    problemas: list[str] = []
+    for nome, campos in bruto.items():
+        if not isinstance(campos, dict):
+            problemas.append(f"{nome!r} nao e uma secao [{nome}]")
+            continue
+        if nome in NOMES_RESERVADOS:
+            problemas.append(f"[{nome}]: nome reservado")
+            continue
+        desconhecidos = set(campos) - set(_OBRIGATORIOS) - set(_OPCIONAIS)
+        faltando = [c for c in _OBRIGATORIOS if not str(campos.get(c, "")).strip()]
+        if desconhecidos:
+            problemas.append(f"[{nome}]: campo(s) desconhecido(s) "
+                             f"{sorted(desconhecidos)}")
+        if faltando:
+            problemas.append(f"[{nome}]: falta {', '.join(faltando)}")
+        if desconhecidos or faltando:
+            continue
+        status = status_canonico(campos["status"])
+        if status is None:
+            problemas.append(f"[{nome}]: status {campos['status']!r} nao existe "
+                             f"(use {', '.join(STATUS_VALIDOS)})")
+            continue
+        perfis[nome] = PerfilTarefa(
+            nome=nome,
+            descricao=" ".join(str(campos["descricao"]).split()),
+            tipo=str(campos["tipo"]).strip(),
+            status=status,
+            responsavel=" ".join(str(campos["responsavel"]).split()),
+            dica_arquivo=str(campos.get("dica_arquivo", "")).strip(),
+        )
+
+    # Duas secoes com a mesma descricao dividiriam as mesmas linhas do ledger:
+    # a rodada de uma pularia os processos da outra.
+    por_descricao: dict[str, list[str]] = {}
+    for perfil in perfis.values():
+        por_descricao.setdefault(perfil.descricao.upper(), []).append(perfil.nome)
+    for descricao, nomes in por_descricao.items():
+        if len(nomes) > 1:
+            problemas.append(f"descricao {descricao!r} repetida em {nomes}")
+
+    if problemas:
+        raise ErroPerfis(f"{caminho}:\n  " + "\n  ".join(problemas))
+    return perfis
+
+
+# Arquivo com problema nao derruba o import: --help e --relatorio nao precisam
+# de perfil, e a rodada transforma ERRO_PERFIS em erro de uso (codigo 2).
+try:
+    PERFIS = carregar_perfis(ARQUIVO_PERFIS)
+    ERRO_PERFIS = ""
+except ErroPerfis as _e:
+    PERFIS = {}
+    ERRO_PERFIS = str(_e)
+
+# Vale quando --tarefa nao e dado (e nem --descricao). Se o arquivo nao tiver
+# este perfil, a rodada exige --tarefa.
+PERFIL_PADRAO = "faturamento-final" if "faturamento-final" in PERFIS else None
 
 # Descricao -> perfil. Serve para resolver a tarefa de uma linha da planilha no
-# modo auto. Tipo, status e responsavel de um cadastro ja feito nao saem mais
-# daqui: o ledger guarda os valores que foram de fato enviados.
+# modo auto (e no modo planilha, quando a descricao e a de um perfil).
 PERFIS_POR_DESCRICAO = {p.descricao: p for p in PERFIS.values()}
 
 _DESCRICOES_POR_TIPO = {d.upper(): d for d in PERFIS_POR_DESCRICAO}
@@ -183,15 +305,6 @@ def tarefa_do_tipo(tipo: str) -> str | None:
     """
     return _DESCRICOES_POR_TIPO.get(" ".join(str(tipo).split()).upper())
 
-# "Nao cumprido" contem "Cumprido": o casamento no lookup precisa ser exato.
-STATUS_VALIDOS = {
-    "Pendente": "0",
-    "Cumprido": "1",
-    "Não cumprido": "2",
-    "Cancelado": "3",
-    "Iniciado": "4",
-    "Recusado": "5",
-}
 
 # Status que o Legal One nao aceita com data de conclusao anterior a hoje: ele
 # devolve "O status selecionado nao pode ser 'Pendente' quando a data de
@@ -212,6 +325,14 @@ COLUNAS_TIPO_COBRANCA = ("TIPO DE COBRANÇA", "TAREFA", "TAREFA PARA LANÇAR")
 # Nome canonico, para as mensagens de log e a ajuda da CLI.
 COLUNA_TIPO_COBRANCA = COLUNAS_TIPO_COBRANCA[0]
 COLUNA_STATUS_LEGALONE = "STATUS LEGAL ONE"
+
+# As colunas do modo --tarefa planilha. O sufixo "DA TAREFA" e de proposito:
+# planilha juridica costuma ter RESPONSAVEL (o advogado do caso) e STATUS (o do
+# processo), e nenhuma delas pode mudar a tarefa sem ninguem pedir.
+COLUNA_DESCRICAO_TAREFA = "DESCRIÇÃO DA TAREFA"
+COLUNA_TIPO_TAREFA = "TIPO DA TAREFA"
+COLUNA_STATUS_TAREFA = "STATUS DA TAREFA"
+COLUNA_RESPONSAVEL_TAREFA = "RESPONSÁVEL DA TAREFA"
 
 # --- Execucao ----------------------------------------------------------------
 

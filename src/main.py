@@ -1,9 +1,10 @@
 """Cadastro em lote de tarefas no Legal One.
 
 Le a planilha de cobrancas, encontra cada processo no Legal One e cadastra a
-tarefa do perfil escolhido em --tarefa (FATURAMENTO FINAL ou DEFESA FATURADA),
-ou, com --tarefa auto, a tarefa que a coluna TIPO DE COBRANCA indica em cada
-linha. Por padrao roda em simulacao — precisa de --executar para gravar.
+tarefa de cada um. A tarefa vem de um perfil do tarefas.toml (--tarefa), de
+--descricao/--tipo/--status/--responsavel, da coluna TIPO DE COBRANCA
+(--tarefa auto) ou das colunas "... DA TAREFA" de cada linha (--tarefa
+planilha). Por padrao roda em simulacao — precisa de --executar para gravar.
 
 Codigos de saida:
     0    rodada completa (ou nada a fazer)
@@ -13,6 +14,7 @@ Codigos de saida:
     130  interrompida com Ctrl+C
 """
 import argparse
+import collections
 import dataclasses
 import datetime
 import logging
@@ -77,6 +79,17 @@ def dia_iso(texto: str) -> str:
         raise argparse.ArgumentTypeError(f"{texto!r} nao esta no formato AAAA-MM-DD")
 
 
+def status_arg(texto: str) -> str:
+    """Valida --status, aceitando sem acento e em qualquer caixa."""
+    status = config.status_canonico(texto)
+    if status is None:
+        raise argparse.ArgumentTypeError(
+            f"{texto!r} nao e status do Legal One "
+            f"({', '.join(config.STATUS_VALIDOS)})"
+        )
+    return status
+
+
 def argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Cadastra tarefas em lote no Legal One a partir de uma planilha.",
@@ -102,6 +115,16 @@ def argumentos(argv: list[str] | None = None) -> argparse.Namespace:
   python main.py --planilha "Planilha de Faturamento.xlsx" \\
       --abas "2019-2020-2021" --tarefa auto --executar
 
+  # uma tarefa que nao esta no tarefas.toml
+  python main.py --planilha "..." --descricao "CONFERIR CUSTAS" \\
+      --tipo "Diversos" --status Pendente --responsavel "Nathalia Maria Gatto Pinto"
+
+  # um perfil do arquivo, com outro responsavel so nesta rodada
+  python main.py --planilha "..." --tarefa defesa-faturada --responsavel "Nathalia"
+
+  # a tarefa inteira vem das colunas "... DA TAREFA" de cada linha
+  python main.py --planilha "Tarefas.xlsx" --tarefa planilha --executar
+
   # refazer os relatorios, ou a planilha de um dia especifico
   python main.py --relatorio
   python main.py --relatorio --dia 2026-07-30
@@ -109,13 +132,34 @@ def argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--planilha", help="caminho do .xlsx de cobrancas")
     p.add_argument("--tarefa",
-                   choices=sorted([*config.PERFIS, config.NOME_AUTO]),
-                   default=config.PERFIL_PADRAO,
-                   help=f"qual tarefa cadastrar (padrao: {config.PERFIL_PADRAO}). "
+                   # Com o tarefas.toml quebrado nao ha lista de perfis, e o
+                   # argparse responderia so "invalid choice". Sem a lista, a
+                   # rodada chega a mostrar o que esta errado no arquivo.
+                   choices=None if config.ERRO_PERFIS else sorted(
+                       [*config.PERFIS, config.NOME_AUTO, config.NOME_PLANILHA]),
+                   help=f"perfil do {config.ARQUIVO_PERFIS.name} (padrao: "
+                        f"{config.PERFIL_PADRAO}). "
                         + " | ".join(f"{n} = {p.descricao!r}"
                                      for n, p in sorted(config.PERFIS.items()))
                         + f" | {config.NOME_AUTO} = a tarefa de cada linha vem da "
-                          f"coluna {config.COLUNA_TIPO_COBRANCA!r}")
+                          f"coluna {config.COLUNA_TIPO_COBRANCA!r}"
+                        + f" | {config.NOME_PLANILHA} = a tarefa inteira vem das "
+                          f"colunas {config.COLUNA_DESCRICAO_TAREFA!r}, "
+                          f"{config.COLUNA_TIPO_TAREFA!r}, "
+                          f"{config.COLUNA_STATUS_TAREFA!r} e "
+                          f"{config.COLUNA_RESPONSAVEL_TAREFA!r}")
+    valores = p.add_argument_group(
+        "valores da tarefa",
+        "Sobrepoem os do perfil nesta rodada. Com --tarefa planilha, valem para "
+        "as linhas com a coluna vazia. --descricao cadastra uma tarefa fora do "
+        "tarefas.toml, e ai --status e --responsavel sao obrigatorios.")
+    valores.add_argument("--descricao", help="descricao de uma tarefa avulsa")
+    valores.add_argument("--tipo",
+                         help='caminho na arvore de tipos: "Diversos" ou '
+                              '"Diversos / Contato Telefônico"')
+    valores.add_argument("--status", type=status_arg,
+                         help=", ".join(config.STATUS_VALIDOS))
+    valores.add_argument("--responsavel", help="usuario ativo do Legal One")
     p.add_argument("--forcar-planilha", action="store_true",
                    help="ignora a trava que confere se a planilha combina com --tarefa")
     p.add_argument("--abas", nargs="+", help="abas a considerar (padrao: todas)")
@@ -232,16 +276,18 @@ class Rodada:
                  pular_existentes: bool = False,
                  max_cadastros: int | None = None,
                  data_fixa: str | None = None,
-                 resolvidos: dict[str, config.PerfilTarefa] | None = None):
+                 resolucao: catalogo.Resolucao | None = None):
         self.automador = automador
         self.registro = registro
         self.perfil = perfil
         # --data. Sem ela, a data e a de hoje no instante de cada cadastro.
         self.data_fixa = data_fixa
-        # Descricao -> perfil com tipo e responsavel conferidos no Legal One
-        # (ver _resolver_perfis). Perfil fora daqui vai como esta, e o
-        # formulario so confere o tipo que ja vem nele.
-        self.resolvidos = resolvidos or {}
+        # Tipo e responsavel conferidos no Legal One (ver _resolver_perfis).
+        # Valor fora dela vai como esta, e o formulario so confere o tipo que
+        # ja vem nele.
+        self.resolucao = resolucao or catalogo.Resolucao()
+        # As descricoes da fila, para o acumulado do resumo.
+        self.descricoes: list[str] = [perfil.descricao]
         self.executar = executar
         self.so_buscar = so_buscar
         self.rapido = rapido
@@ -278,6 +324,8 @@ class Rodada:
 
     def executar_fila(self, fila: list[planilha.Processo]) -> None:
         total = len(fila)
+        self.descricoes = sorted({self._perfil_de(p).descricao for p in fila}) \
+            or self.descricoes
         inicio = time.monotonic()
 
         try:
@@ -343,9 +391,14 @@ class Rodada:
             self._descartar_suspeitos()
 
     def _perfil_de(self, proc: planilha.Processo) -> config.PerfilTarefa:
-        """Perfil da tarefa deste processo — o da linha, ou o padrao da rodada."""
-        perfil = config.PERFIS_POR_DESCRICAO.get(proc.tarefa, self.perfil)
-        return self.resolvidos.get(perfil.descricao, perfil)
+        """Perfil da tarefa deste processo, com tipo e responsavel conferidos.
+
+        Vem do proprio processo (a preparacao da rodada atribui um a cada um);
+        na falta dele, da descricao da linha ou do perfil da rodada.
+        """
+        perfil = proc.perfil or config.PERFIS_POR_DESCRICAO.get(
+            proc.tarefa, self.perfil)
+        return self.resolucao.aplicar(perfil)
 
     def _tarefa_de(self, proc: planilha.Processo) -> config.Tarefa:
         """A tarefa a enviar para este processo, com a data resolvida agora.
@@ -583,7 +636,7 @@ class Rodada:
 
     def resumir(self, conferencia: str, pendentes: int) -> None:
         logger.info("Resumo desta rodada: %s", self.contagem)
-        for descricao in _descricoes_da_rodada(self.perfil):
+        for descricao in self.descricoes:
             logger.info("Acumulado em %-18s %s", descricao + ":",
                         dict(self.registro.resumo(descricao)))
         logger.info("Acumulado geral:     %s", dict(self.registro.resumo()))
@@ -600,11 +653,115 @@ class Rodada:
 
 # --- preparacao da rodada ----------------------------------------------------
 
-def _descricoes_da_rodada(perfil: config.PerfilTarefa) -> list[str]:
-    """Tarefas que a rodada pode cadastrar — no modo auto, todas elas."""
-    if perfil.nome == config.NOME_AUTO:
-        return list(config.PERFIS_POR_DESCRICAO)
-    return [perfil.descricao]
+def _perfil_da_rodada(args: argparse.Namespace) -> config.PerfilTarefa:
+    """O perfil que a linha de comando pede, com as flags por cima.
+
+    Nos modos auto e planilha e um marcador: cada processo recebe o seu em
+    _atribuir_perfis.
+    """
+    if args.descricao:
+        if args.tarefa:
+            raise ErroDeUso(
+                "--descricao ja define a tarefa; nao combine com --tarefa. Para "
+                "mudar um valor de um perfil, use --tipo/--status/--responsavel "
+                "com --tarefa."
+            )
+        faltando = [f for f, v in (("--status", args.status),
+                                   ("--responsavel", args.responsavel)) if not v]
+        if faltando:
+            # Sem padrao escondido: uma tarefa nova que caisse em Cumprido e no
+            # nome de quem ninguem escolheu passaria por certa.
+            raise ErroDeUso(f"Tarefa avulsa (--descricao) precisa de "
+                            f"{' e '.join(faltando)}.")
+        return config.PerfilTarefa(
+            config.NOME_AVULSA, " ".join(args.descricao.split()),
+            tipo=args.tipo or "Diversos", status=args.status,
+            responsavel=args.responsavel,
+        )
+    nome = args.tarefa or config.PERFIL_PADRAO
+    if nome is None:
+        raise ErroDeUso(f"Falta --tarefa (o {config.ARQUIVO_PERFIS.name} nao tem "
+                        f"o perfil padrao) ou --descricao.")
+    if nome == config.NOME_AUTO:
+        return config.PERFIL_AUTO
+    if nome == config.NOME_PLANILHA:
+        return config.PERFIL_PLANILHA
+    return _com_flags(config.PERFIS[nome], args)
+
+
+def _com_flags(perfil: config.PerfilTarefa,
+               args: argparse.Namespace) -> config.PerfilTarefa:
+    """O perfil com --tipo, --status e --responsavel por cima, se dados."""
+    trocas = {campo: valor for campo, valor in (
+        ("tipo", args.tipo), ("status", args.status),
+        ("responsavel", args.responsavel)) if valor}
+    return dataclasses.replace(perfil, **trocas) if trocas else perfil
+
+
+def _perfil_da_linha(proc: planilha.Processo,
+                     args: argparse.Namespace) -> tuple[config.PerfilTarefa | None, str]:
+    """O perfil de uma linha do modo planilha: linha > flag > tarefas.toml.
+
+    Se a descricao da linha e a de um perfil do arquivo, o perfil completa o
+    que a linha e as flags nao disserem, e a descricao passa a ser escrita como
+    no perfil — o ledger e a checagem de duplicata comparam por ela. Devolve
+    (perfil, "") ou (None, motivo).
+    """
+    base = config.PERFIS_POR_DESCRICAO.get(
+        config.tarefa_do_tipo(proc.tarefa) or "")
+    campos = proc.campos_tarefa
+
+    def valor(campo: str) -> str:
+        return (campos.get(campo) or getattr(args, campo)
+                or (getattr(base, campo) if base else ""))
+
+    status_bruto = valor("status")
+    status = config.status_canonico(status_bruto) if status_bruto else None
+    responsavel = valor("responsavel")
+    faltando = [c for c, v in (("status", status_bruto),
+                               ("responsavel", responsavel)) if not v]
+    if faltando:
+        return None, f"sem {' e '.join(faltando)}"
+    if status is None:
+        return None, f"status {status_bruto!r} nao existe"
+    return config.PerfilTarefa(
+        base.nome if base else config.NOME_PLANILHA,
+        base.descricao if base else proc.tarefa,
+        tipo=valor("tipo") or "Diversos", status=status,
+        responsavel=responsavel,
+    ), ""
+
+
+def _atribuir_perfis(args: argparse.Namespace, perfil: config.PerfilTarefa,
+                     processos: list[planilha.Processo]) -> None:
+    """Da a cada processo o perfil completo da sua tarefa.
+
+    Depois daqui a rodada nao precisa saber de onde a tarefa veio: perfil do
+    arquivo, flags, coluna de cobranca ou colunas da tarefa. Linha do modo
+    planilha que nao da uma tarefa completa e erro de uso, com as linhas.
+    """
+    problemas: list[str] = []
+    for proc in processos:
+        if perfil.nome == config.NOME_AUTO:
+            proc.perfil = _com_flags(config.PERFIS_POR_DESCRICAO[proc.tarefa], args)
+        elif perfil.nome == config.NOME_PLANILHA:
+            proc.perfil, motivo = _perfil_da_linha(proc, args)
+            if proc.perfil is None:
+                problemas.append(f"{proc.origem} ({proc.cnj_original}): {motivo}")
+                continue
+            proc.tarefa = proc.perfil.descricao
+        else:
+            proc.perfil = perfil
+    if problemas:
+        raise ErroDeUso(
+            "Linha(s) sem tarefa completa (nem na coluna, nem nas flags, nem no "
+            f"{config.ARQUIVO_PERFIS.name}):\n  " + "\n  ".join(problemas[:20])
+            + (f"\n  (e mais {len(problemas) - 20})" if len(problemas) > 20 else "")
+        )
+
+
+def _perfis_distintos(processos: list[planilha.Processo]) -> list[config.PerfilTarefa]:
+    return list(dict.fromkeys(p.perfil for p in processos if p.perfil))
 
 
 def _conferir_planilha(args: argparse.Namespace, perfil: config.PerfilTarefa) -> None:
@@ -635,7 +792,7 @@ def _data_da_tarefa(args: argparse.Namespace) -> str:
 
 
 def _conferir_data_passada(args: argparse.Namespace,
-                           perfil: config.PerfilTarefa) -> None:
+                           perfis: list[config.PerfilTarefa]) -> None:
     """Recusa, antes de abrir o Chrome, a data passada que o Legal One barra.
 
     Sem isto cada processo da fila viraria erro com a mesma mensagem, ate o
@@ -647,8 +804,6 @@ def _conferir_data_passada(args: argparse.Namespace,
     data = datetime.datetime.strptime(args.data, FORMATO_DATA).date()
     if data >= datetime.date.today():
         return
-    perfis = (config.PERFIS_POR_DESCRICAO.values()
-              if perfil.nome == config.NOME_AUTO else [perfil])
     recusados = sorted({p.status for p in perfis}
                        & config.STATUS_RECUSADOS_NO_PASSADO)
     if recusados:
@@ -660,46 +815,41 @@ def _conferir_data_passada(args: argparse.Namespace,
                    "e ela sera dada em cada cadastro.", args.data)
 
 
-def _perfis_da_rodada(perfil: config.PerfilTarefa) -> list[config.PerfilTarefa]:
-    """Perfis que a rodada pode cadastrar — no modo auto, todos eles."""
-    if perfil.nome == config.NOME_AUTO:
-        return list(config.PERFIS_POR_DESCRICAO.values())
-    return [perfil]
-
-
 def _resolver_perfis(automador, perfis: list[config.PerfilTarefa]
-                     ) -> dict[str, config.PerfilTarefa]:
-    """Confere no Legal One o tipo e o responsavel de cada perfil da rodada.
+                     ) -> catalogo.Resolucao:
+    """Confere no Legal One cada tipo e cada responsavel pedidos na rodada.
 
     Roda uma vez, antes do primeiro cadastro: um tipo que nao existe ou um
     responsavel ambiguo viraria o mesmo erro em cada processo da fila, e um
-    casamento errado criaria centenas de tarefas no lugar errado. Devolve os
-    perfis reescritos como o Legal One escreve tipo e nome, e com o id do tipo.
-    Qualquer problema junta todos os perfis numa mensagem so e vira ErroDeUso.
+    casamento errado criaria centenas de tarefas no lugar errado. Cada valor
+    distinto e conferido uma vez so, venha de quantos perfis vier. Qualquer
+    problema junta tudo numa mensagem so e vira ErroDeUso.
     """
-    tipos = automador.listar_tipos()
-    usuarios: dict[str, list[str]] = {}
-    resolvidos: dict[str, config.PerfilTarefa] = {}
+    def onde(campo: str, valor: str) -> str:
+        return ", ".join(sorted({repr(p.descricao) for p in perfis
+                                 if getattr(p, campo) == valor}))
+
+    resolucao = catalogo.Resolucao()
     problemas: list[str] = []
-    for perfil in perfis:
+    tipos = automador.listar_tipos()
+    for pedido in dict.fromkeys(p.tipo for p in perfis):
         try:
-            tipo = catalogo.resolver_tipo(perfil.tipo, tipos)
-            if perfil.responsavel not in usuarios:
-                usuarios[perfil.responsavel] = automador.buscar_usuarios(
-                    perfil.responsavel)
-            nome = catalogo.resolver_usuario(perfil.responsavel,
-                                             usuarios[perfil.responsavel])
+            tipo = resolucao.tipos[pedido] = catalogo.resolver_tipo(pedido, tipos)
+            logger.info("Conferido:   tipo %r -> %r (%s)", pedido, tipo.caminho,
+                        tipo.id)
         except catalogo.NaoResolvido as e:
-            problemas.append(f"{perfil.descricao}: {e}")
-            continue
-        resolvidos[perfil.descricao] = dataclasses.replace(
-            perfil, tipo=tipo.caminho, tipo_id=tipo.id, responsavel=nome)
-        logger.info("Conferido:   %r -> tipo %r (%s), responsavel %r",
-                    perfil.descricao, tipo.caminho, tipo.id, nome)
+            problemas.append(f"{e} [em {onde('tipo', pedido)}]")
+    for pedido in dict.fromkeys(p.responsavel for p in perfis):
+        try:
+            nome = resolucao.responsaveis[pedido] = catalogo.resolver_usuario(
+                pedido, automador.buscar_usuarios(pedido))
+            logger.info("Conferido:   responsavel %r -> %r", pedido, nome)
+        except catalogo.NaoResolvido as e:
+            problemas.append(f"{e} [em {onde('responsavel', pedido)}]")
     if problemas:
         raise ErroDeUso("Tarefa que nao da para cadastrar no Legal One:\n  "
                         + "\n  ".join(problemas))
-    return resolvidos
+    return resolucao
 
 
 def _montar_fila(args: argparse.Namespace, registro: ledger_mod.Ledger,
@@ -717,8 +867,11 @@ def _montar_fila(args: argparse.Namespace, registro: ledger_mod.Ledger,
         pular: set[tuple[str, str]] = set()
     else:
         feitos = registro.concluidos if args.retentar else registro.todos
+        # As descricoes que esta planilha de fato pede — no modo planilha elas
+        # nem existem num perfil.
+        descricoes = {p.tarefa or perfil.descricao for p in processos}
         pular = {(cnj, descricao)
-                 for descricao in _descricoes_da_rodada(perfil)
+                 for descricao in descricoes
                  for cnj in feitos(descricao)}
 
     if args.processo:
@@ -745,14 +898,21 @@ def _log_cabecalho(args: argparse.Namespace, perfil: config.PerfilTarefa,
     if perfil.nome == config.NOME_AUTO:
         logger.info("Tarefa:      de cada linha, pela coluna %r",
                     config.COLUNA_TIPO_COBRANCA)
-        for descricao in _descricoes_da_rodada(perfil):
-            quantos = sum(1 for p in processos if p.tarefa == descricao)
-            logger.info("             %-18s %d processo(s)",
-                        descricao + ":", quantos)
-    else:
-        logger.info("Tarefa:      %r / tipo %r / status %r",
-                    perfil.descricao, perfil.tipo, perfil.status)
-        logger.info("Responsavel: %s", perfil.responsavel)
+    elif perfil.nome == config.NOME_PLANILHA:
+        logger.info("Tarefa:      de cada linha, pelas colunas %r e seguintes",
+                    config.COLUNA_DESCRICAO_TAREFA)
+    # Cada combinacao distinta, com quantos processos a pedem: e aqui que se ve,
+    # antes de --executar, uma coluna de responsavel trocada ou um status
+    # errado na planilha inteira.
+    combinacoes = collections.Counter(p.perfil for p in processos if p.perfil)
+    for combinacao, quantos in combinacoes.most_common():
+        logger.info("Tarefa:      %r / tipo %r / status %r / responsavel %r: "
+                    "%d processo(s)", combinacao.descricao, combinacao.tipo,
+                    combinacao.status, combinacao.responsavel, quantos)
+    if not combinacoes:
+        logger.info("Tarefa:      %r / tipo %r / status %r / responsavel %r",
+                    perfil.descricao, perfil.tipo, perfil.status,
+                    perfil.responsavel)
     logger.info("Data:        %s", data_tarefa)
     logger.info("Planilha:    %s", args.planilha)
     logger.info("             %d processo(s) unico(s)", len(processos))
@@ -795,11 +955,12 @@ def _modo_rodada(args: argparse.Namespace) -> int:
     if args.dia:
         logger.warning("--dia so vale com --relatorio; ignorando.")
 
-    auto = args.tarefa == config.NOME_AUTO
-    perfil = config.PERFIL_AUTO if auto else config.PERFIS[args.tarefa]
+    if config.ERRO_PERFIS:
+        raise ErroDeUso(f"Perfis com problema: {config.ERRO_PERFIS}")
+
+    perfil = _perfil_da_rodada(args)
     _conferir_planilha(args, perfil)
     data_tarefa = _data_da_tarefa(args)
-    _conferir_data_passada(args, perfil)
 
     try:
         processos = planilha.ler(
@@ -807,10 +968,14 @@ def _modo_rodada(args: argparse.Namespace) -> int:
             abas=args.abas,
             tipo_contem=args.tipo_contem,
             status_planilha=args.status_planilha,
-            tarefa_da_linha=config.tarefa_do_tipo if auto else None,
+            tarefa_da_linha=(config.tarefa_do_tipo
+                             if perfil.nome == config.NOME_AUTO else None),
+            colunas_da_tarefa=perfil.nome == config.NOME_PLANILHA,
         )
     except (FileNotFoundError, ValueError) as e:
         raise ErroDeUso(str(e)) from e
+    _atribuir_perfis(args, perfil, processos)
+    _conferir_data_passada(args, _perfis_distintos(processos))
 
     with ledger_mod.Ledger(config.LEDGER_FILE) as registro:
         processos, fila, pular = _montar_fila(args, registro, perfil, processos)
@@ -834,10 +999,10 @@ def _modo_rodada(args: argparse.Namespace) -> int:
         automador.usar_aba_propria()
 
         # --so-buscar nao abre formulario: nao ha tipo nem responsavel a conferir.
-        resolvidos: dict[str, config.PerfilTarefa] = {}
+        resolucao = catalogo.Resolucao()
         if not args.so_buscar:
             try:
-                resolvidos = _resolver_perfis(automador, _perfis_da_rodada(perfil))
+                resolucao = _resolver_perfis(automador, _perfis_distintos(fila))
             except legalone.SessaoExpirada as e:
                 logger.error("SESSAO EXPIRADA: %s", e)
                 return SAIDA_SESSAO
@@ -858,7 +1023,7 @@ def _modo_rodada(args: argparse.Namespace) -> int:
             pular_existentes=args.pular_existentes,
             max_cadastros=args.max_cadastros,
             data_fixa=args.data,
-            resolvidos=resolvidos,
+            resolucao=resolucao,
         )
         try:
             rodada.executar_fila(fila)

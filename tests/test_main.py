@@ -47,7 +47,10 @@ def test_limite_invalido_para_a_cli():
 def test_padroes_da_cli():
     args = main.argumentos(["--planilha", "x.xlsx"])
 
-    assert args.tarefa == config.PERFIL_PADRAO
+    # Sem --tarefa, vale o perfil padrao — decidido depois, e nao no argparse,
+    # para --descricao poder recusar um --tarefa dado de verdade.
+    assert args.tarefa is None
+    assert main._perfil_da_rodada(args).nome == config.PERFIL_PADRAO
     assert args.executar is False  # simulacao e o padrao
     assert args.limite is None
 
@@ -109,13 +112,13 @@ def test_data_passada_com_status_que_o_legal_one_barra_e_recusada():
     args = main.argumentos(["--planilha", "x.xlsx", "--data", _dia(-1)])
 
     with pytest.raises(main.ErroDeUso, match="Pendente"):
-        main._conferir_data_passada(args, pendente)
+        main._conferir_data_passada(args, [pendente])
 
 
 def test_data_passada_com_cumprido_so_avisa(caplog):
     args = main.argumentos(["--planilha", "x.xlsx", "--data", _dia(-7)])
 
-    main._conferir_data_passada(args, config.PERFIS["defesa-faturada"])
+    main._conferir_data_passada(args, [config.PERFIS["defesa-faturada"]])
 
     assert "anterior a hoje" in caplog.text
 
@@ -125,19 +128,19 @@ def test_hoje_ou_futuro_nao_passa_pela_conferencia(argv, caplog):
     pendente = config.PerfilTarefa("pendente-teste", "TAREFA X", status="Pendente")
     args = main.argumentos(["--planilha", "x.xlsx", *argv])
 
-    main._conferir_data_passada(args, pendente)
+    main._conferir_data_passada(args, [pendente])
 
     assert "anterior a hoje" not in caplog.text
 
 
-def test_data_passada_no_modo_auto_confere_todos_os_perfis(monkeypatch):
+def test_data_passada_confere_todos_os_perfis_da_rodada():
+    # Nos modos auto e planilha a fila mistura perfis; basta um Pendente.
     pendente = config.PerfilTarefa("pendente-teste", "TAREFA X", status="Pendente")
-    monkeypatch.setitem(config.PERFIS_POR_DESCRICAO, pendente.descricao, pendente)
-    args = main.argumentos(["--planilha", "x.xlsx", "--tarefa", "auto",
-                            "--data", _dia(-1)])
+    args = main.argumentos(["--planilha", "x.xlsx", "--data", _dia(-1)])
 
     with pytest.raises(main.ErroDeUso, match="Pendente"):
-        main._conferir_data_passada(args, config.PERFIL_AUTO)
+        main._conferir_data_passada(
+            args, [config.PERFIS["defesa-faturada"], pendente])
 
 
 def test_trava_de_planilha_por_perfil():
@@ -634,9 +637,9 @@ def test_resolver_perfis_reescreve_como_o_legal_one_escreve():
                                  tipo="diversos > contato telefonico",
                                  responsavel="heloiza")
 
-    resolvidos = main._resolver_perfis(AutomadorFalso(), [pedido])
+    resolucao = main._resolver_perfis(AutomadorFalso(), [pedido])
 
-    perfil = resolvidos["TAREFA X"]
+    perfil = resolucao.aplicar(pedido)
     assert (perfil.tipo, perfil.tipo_id, perfil.responsavel) == (
         "Diversos / Contato Telefônico", "subtipo_9", "Heloiza Helena de Araujo")
 
@@ -656,10 +659,10 @@ def test_perfis_de_verdade_passam_pela_conferencia():
     # Os perfis de producao tem que resolver sem ajuste, e no tipo que o
     # formulario ja traz: e o que garante que faturamento e defesa continuam
     # sendo cadastrados exatamente como antes.
-    resolvidos = main._resolver_perfis(
-        AutomadorFalso(), list(config.PERFIS.values()))
+    perfis = list(config.PERFIS.values())
+    resolucao = main._resolver_perfis(AutomadorFalso(), perfis)
 
-    for perfil in resolvidos.values():
+    for perfil in map(resolucao.aplicar, perfis):
         assert (perfil.tipo_id, perfil.responsavel) == (
             "tipo_4", "Heloiza Helena de Araujo")
 
@@ -702,3 +705,149 @@ def test_so_buscar_nao_depende_da_conferencia(dados_tmp, monkeypatch, tmp_path):
 
     assert main.main(["--planilha", str(arq), "--so-buscar"]) == main.SAIDA_OK
     assert ACHADO in automador.buscados
+
+
+# --- de onde vem a tarefa: perfil, flags, avulsa, coluna ---------------------
+
+PEDRO = "Pedro Henrique Braz Moreira"
+NATHALIA = "Nathalia Maria Gatto Pinto"
+
+
+def _args(*argv):
+    return main.argumentos(["--planilha", "x.xlsx", *argv])
+
+
+def test_flags_sobrepoem_o_perfil_sem_perder_descricao_e_trava():
+    perfil = main._perfil_da_rodada(_args("--tarefa", "defesa-faturada",
+                                          "--responsavel", NATHALIA))
+
+    assert (perfil.descricao, perfil.status, perfil.responsavel,
+            perfil.dica_arquivo) == ("DEFESA FATURADA", "Cumprido", NATHALIA,
+                                     "Defesa")
+
+
+def test_tarefa_avulsa():
+    perfil = main._perfil_da_rodada(_args(
+        "--descricao", "  CONFERIR   CUSTAS ", "--status", "pendente",
+        "--responsavel", PEDRO))
+
+    assert (perfil.nome, perfil.descricao, perfil.tipo, perfil.status,
+            perfil.responsavel, perfil.dica_arquivo) == (
+        config.NOME_AVULSA, "CONFERIR CUSTAS", "Diversos", "Pendente", PEDRO, "")
+
+
+@pytest.mark.parametrize("falta, argv", [
+    ("--status", ["--responsavel", PEDRO]),
+    ("--responsavel", ["--status", "Cumprido"]),
+    ("--status e --responsavel", []),
+])
+def test_tarefa_avulsa_exige_status_e_responsavel(falta, argv):
+    # Sem padrao escondido: uma tarefa nova nao cai em Cumprido/Heloiza.
+    with pytest.raises(main.ErroDeUso, match=falta):
+        main._perfil_da_rodada(_args("--descricao", "X", *argv))
+
+
+def test_descricao_nao_combina_com_tarefa():
+    with pytest.raises(main.ErroDeUso, match="nao combine com --tarefa"):
+        main._perfil_da_rodada(_args("--tarefa", "defesa-faturada",
+                                     "--descricao", "X", "--status", "Cumprido",
+                                     "--responsavel", PEDRO))
+
+
+def test_status_invalido_para_na_cli():
+    with pytest.raises(SystemExit) as saida:
+        _args("--status", "Feito")
+    assert saida.value.code == 2
+
+
+def test_arquivo_de_perfis_com_problema_e_erro_de_uso(dados_tmp, monkeypatch, caplog):
+    monkeypatch.setattr(config, "ERRO_PERFIS", "tarefas.toml: [x]: falta status")
+
+    assert main.main(["--planilha", "x.xlsx"]) == main.SAIDA_USO
+    assert "falta status" in caplog.text
+
+
+def test_modo_auto_aplica_as_flags_em_cada_perfil(registro):
+    processos = [processo("A", tarefa="DEFESA FATURADA"),
+                 processo("B", tarefa="FATURAMENTO FINAL")]
+
+    main._atribuir_perfis(_args("--tarefa", "auto", "--responsavel", PEDRO),
+                          config.PERFIL_AUTO, processos)
+
+    assert [(p.perfil.descricao, p.perfil.responsavel) for p in processos] == [
+        ("DEFESA FATURADA", PEDRO), ("FATURAMENTO FINAL", PEDRO)]
+
+
+def _da_planilha(cnj, descricao, tipo="", status="", responsavel=""):
+    proc = processo(cnj, tarefa=descricao)
+    proc.campos_tarefa = {"tipo": tipo, "status": status, "responsavel": responsavel}
+    return proc
+
+
+def test_modo_planilha_linha_ganha_de_flag_que_ganha_de_perfil():
+    processos = [
+        # Tudo na linha.
+        _da_planilha("A", "CONFERIR CUSTAS", "Diversos / Contato Telefônico",
+                     "Pendente", NATHALIA),
+        # Linha sem responsavel: vale a flag.
+        _da_planilha("B", "CONFERIR CUSTAS", status="Pendente"),
+        # Descricao de um perfil, escrita de outro jeito: o perfil completa o
+        # status, e a descricao passa a ser a do perfil (e a chave do ledger).
+        _da_planilha("C", "defesa  faturada"),
+    ]
+
+    main._atribuir_perfis(_args("--tarefa", "planilha", "--responsavel", PEDRO),
+                          config.PERFIL_PLANILHA, processos)
+
+    assert [(p.tarefa, p.perfil.tipo, p.perfil.status, p.perfil.responsavel)
+            for p in processos] == [
+        ("CONFERIR CUSTAS", "Diversos / Contato Telefônico", "Pendente", NATHALIA),
+        ("CONFERIR CUSTAS", "Diversos", "Pendente", PEDRO),
+        ("DEFESA FATURADA", "Diversos", "Cumprido", PEDRO),
+    ]
+
+
+def test_modo_planilha_linha_incompleta_e_erro_com_a_origem():
+    processos = [_da_planilha("A", "CONFERIR CUSTAS", responsavel=PEDRO),
+                 _da_planilha("B", "CONFERIR CUSTAS", status="Feito",
+                              responsavel=PEDRO)]
+
+    with pytest.raises(main.ErroDeUso) as erro:
+        main._atribuir_perfis(_args("--tarefa", "planilha"),
+                              config.PERFIL_PLANILHA, processos)
+    assert "sem status" in str(erro.value)
+    assert "status 'Feito' nao existe" in str(erro.value)
+    assert "2026!L2" in str(erro.value)
+
+
+def test_rodada_no_modo_planilha_ponta_a_ponta(dados_tmp, monkeypatch, tmp_path):
+    """Planilha com as colunas da tarefa -> conferencia -> formulario -> ledger."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Tarefas"
+    ws.append(["PROCESSO", "DESCRIÇÃO DA TAREFA", "TIPO DA TAREFA",
+               "STATUS DA TAREFA", "RESPONSÁVEL DA TAREFA"])
+    ws.append([ACHADO, "CONFERIR CUSTAS", "diversos > contato telefonico",
+               "pendente", "nathalia"])
+    ws.append([CORRIGIDO, "CONFERIR CUSTAS", None, "Cumprido", "pedro"])
+    arq = tmp_path / "Tarefas.xlsx"
+    wb.save(arq)
+    automador = AutomadorFalso({ACHADO: achou("111"), CORRIGIDO: achou("222")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+
+    assert main.main(["--planilha", str(arq), "--tarefa", "planilha",
+                      "--executar"]) == main.SAIDA_OK
+
+    # O que foi ao formulario ja vem escrito como o Legal One escreve.
+    assert [(t.descricao, t.tipo, t.tipo_id, t.status, t.responsavel)
+            for t in automador.enviadas] == [
+        ("CONFERIR CUSTAS", "Diversos / Contato Telefônico", "subtipo_9",
+         "Pendente", NATHALIA),
+        ("CONFERIR CUSTAS", "Diversos", "tipo_4", "Cumprido", PEDRO),
+    ]
+    relatorio = {linha["PROCESSO"]: linha
+                 for linha in _linhas_csv(dados_tmp / "relatorio.csv")}
+    assert relatorio[ACHADO]["RESPONSAVEL"] == NATHALIA
+    assert relatorio[ACHADO]["TIPO_TAREFA"] == "Diversos / Contato Telefônico"
+    assert relatorio[CORRIGIDO]["STATUS_TAREFA"] == "Cumprido"
