@@ -324,3 +324,129 @@ def test_sem_a_funcao_a_leitura_e_a_de_sempre(tmp_path):
 
     assert len(processos) == 1
     assert processos[0].tarefa == ""
+
+
+# --- modo --tarefa planilha: a tarefa vem das colunas "... DA TAREFA" --------
+
+CABECALHO_TAREFA = ("PROCESSO", "DESCRIÇÃO DA TAREFA", "TIPO DA TAREFA",
+                    "STATUS DA TAREFA", "RESPONSÁVEL DA TAREFA")
+A = "0000001-11.2025.8.05.0001"
+B = "0000002-22.2025.8.05.0001"
+
+
+def test_colunas_da_tarefa_sao_lidas_por_linha(tmp_path):
+    arq = _planilha(tmp_path, {"Tarefas": [
+        CABECALHO_TAREFA,
+        (A, "CONFERIR CUSTAS", "Diversos", "Pendente", "Pedro Henrique Braz Moreira"),
+        (B, "CONFERIR CUSTAS", None, None, "Nathalia Maria Gatto Pinto"),
+    ]})
+
+    processos = planilha.ler(arq, colunas_da_tarefa=True)
+
+    assert [(p.cnj, p.tarefa) for p in processos] == [
+        (A, "CONFERIR CUSTAS"), (B, "CONFERIR CUSTAS")]
+    sem_datas = {"inicio": "", "fim": "", "publicacao": "", "disponibilizacao": ""}
+    assert processos[0].campos_tarefa == {
+        "tipo": "Diversos", "status": "Pendente",
+        "responsavel": "Pedro Henrique Braz Moreira", **sem_datas}
+    # Celula vazia fica vazia: quem completa e a preparacao da rodada.
+    assert processos[1].campos_tarefa == {
+        "tipo": "", "status": "", "responsavel": "Nathalia Maria Gatto Pinto",
+        **sem_datas}
+    # Quem le a planilha nao decide o perfil.
+    assert processos[0].perfil is None
+
+
+def test_linha_sem_descricao_e_pulada_com_aviso(tmp_path, caplog):
+    arq = _planilha(tmp_path, {"Tarefas": [
+        CABECALHO_TAREFA,
+        (A, "CONFERIR CUSTAS", None, "Pendente", "Pedro Henrique Braz Moreira"),
+        (B, None, None, "Pendente", "Pedro Henrique Braz Moreira"),
+    ]})
+
+    processos = planilha.ler(arq, colunas_da_tarefa=True)
+
+    assert [p.cnj for p in processos] == [A]
+    assert "1 linha(s) puladas por DESCRIÇÃO DA TAREFA vazia" in caplog.text
+
+
+def test_mesmo_processo_com_duas_tarefas_vira_dois(tmp_path):
+    arq = _planilha(tmp_path, {"Tarefas": [
+        CABECALHO_TAREFA,
+        (A, "CONFERIR CUSTAS", None, "Pendente", "Pedro Henrique Braz Moreira"),
+        (A, "FATURAMENTO FINAL", None, None, None),
+    ]})
+
+    processos = planilha.ler(arq, colunas_da_tarefa=True)
+
+    assert [p.tarefa for p in processos] == ["CONFERIR CUSTAS", "FATURAMENTO FINAL"]
+
+
+def test_mesma_tarefa_repetida_igual_continua_uma_so(tmp_path):
+    linha = (A, "CONFERIR CUSTAS", None, "Pendente", "Pedro Henrique Braz Moreira")
+    arq = _planilha(tmp_path, {"Tarefas": [CABECALHO_TAREFA, linha, linha]})
+
+    processos = planilha.ler(arq, colunas_da_tarefa=True)
+
+    assert len(processos) == 1
+    assert processos[0].linhas == ["Tarefas!L2", "Tarefas!L3"]
+
+
+def test_mesma_tarefa_com_valores_diferentes_e_erro(tmp_path):
+    # O ledger guarda um cadastro por (processo, descricao): ficar com um dos
+    # dois responsaveis seria chute.
+    arq = _planilha(tmp_path, {"Tarefas": [
+        CABECALHO_TAREFA,
+        (A, "CONFERIR CUSTAS", None, "Pendente", "Pedro Henrique Braz Moreira"),
+        (A, "CONFERIR CUSTAS", None, "Pendente", "Nathalia Maria Gatto Pinto"),
+    ]})
+
+    with pytest.raises(ValueError, match="valores diferentes") as erro:
+        planilha.ler(arq, colunas_da_tarefa=True)
+    assert "Tarefas!L2" in str(erro.value) and "Tarefas!L3" in str(erro.value)
+
+
+def test_planilha_sem_a_coluna_de_descricao_e_erro(tmp_path):
+    # Uma coluna RESPONSAVEL sozinha (o advogado do caso) nao liga o modo.
+    arq = _planilha(tmp_path, {"2026": [
+        ("PROCESSO", "RESPONSÁVEL"),
+        (A, "Pedro Henrique Braz Moreira"),
+    ]})
+
+    with pytest.raises(ValueError, match="DESCRIÇÃO DA TAREFA"):
+        planilha.ler(arq, colunas_da_tarefa=True)
+
+
+def test_colunas_da_tarefa_sao_ignoradas_fora_do_modo(tmp_path):
+    arq = _planilha(tmp_path, {"Tarefas": [
+        CABECALHO_TAREFA,
+        (A, "CONFERIR CUSTAS", None, "Pendente", "Pedro Henrique Braz Moreira"),
+    ]})
+
+    processos = planilha.ler(arq)
+
+    assert processos[0].tarefa == "" and processos[0].campos_tarefa == {}
+
+
+def test_colunas_de_data_aceitam_celula_de_data_e_texto(tmp_path):
+    import datetime
+
+    arq = _planilha(tmp_path, {"Tarefas": [
+        (*CABECALHO_TAREFA, "INÍCIO DA TAREFA", "CONCLUSÃO DA TAREFA",
+         "PUBLICAÇÃO DA TAREFA", "DISPONIBILIZAÇÃO DA TAREFA"),
+        # Celulas de data/hora do Excel.
+        (A, "CONFERIR CUSTAS", None, "Pendente", "Pedro Henrique Braz Moreira",
+         datetime.datetime(2026, 10, 1, 9, 0), datetime.datetime(2026, 10, 1),
+         datetime.date(2026, 9, 25), None),
+        # Texto digitado passa como esta; quem interpreta e o datas.py.
+        (B, "CONFERIR CUSTAS", None, "Pendente", "Pedro Henrique Braz Moreira",
+         "01/10/2026  14:00", None, None, "24/09/2026"),
+    ]})
+
+    a, b = planilha.ler(arq, colunas_da_tarefa=True)
+
+    assert (a.campos_tarefa["inicio"], a.campos_tarefa["fim"],
+            a.campos_tarefa["publicacao"]) == ("01/10/2026 09:00:00", "01/10/2026",
+                                               "25/09/2026")
+    assert (b.campos_tarefa["inicio"], b.campos_tarefa["disponibilizacao"]) == (
+        "01/10/2026 14:00", "24/09/2026")

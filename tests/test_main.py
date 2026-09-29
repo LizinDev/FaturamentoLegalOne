@@ -1,12 +1,14 @@
 """CLI, montagem da fila e exportacoes finais."""
 import argparse
 import csv
+import dataclasses
 import datetime
 
 import pytest
 from openpyxl import Workbook, load_workbook
 
 import config
+import datas
 import ledger as ledger_mod
 import main
 import planilha
@@ -46,7 +48,10 @@ def test_limite_invalido_para_a_cli():
 def test_padroes_da_cli():
     args = main.argumentos(["--planilha", "x.xlsx"])
 
-    assert args.tarefa == config.PERFIL_PADRAO
+    # Sem --tarefa, vale o perfil padrao — decidido depois, e nao no argparse,
+    # para --descricao poder recusar um --tarefa dado de verdade.
+    assert args.tarefa is None
+    assert main._perfil_da_rodada(args).nome == config.PERFIL_PADRAO
     assert args.executar is False  # simulacao e o padrao
     assert args.limite is None
 
@@ -88,13 +93,78 @@ def test_data_invalida():
     args = main.argumentos(["--planilha", "x.xlsx", "--data", "2026-07-30"])
 
     with pytest.raises(main.ErroDeUso, match="Data invalida"):
-        main._data_da_tarefa(args)
+        main._agenda_da_rodada(args)
 
 
-def test_data_padrao_e_hoje():
+def test_sem_datas_na_cli_e_hoje():
     args = main.argumentos(["--planilha", "x.xlsx"])
 
-    assert main._data_da_tarefa(args) == datetime.date.today().strftime("%d/%m/%Y")
+    agenda = main._agenda_da_rodada(args)
+    assert agenda == datas.Agenda() and not agenda.escolhida
+
+
+def test_inicio_e_apelido_de_data():
+    args = main.argumentos(["--planilha", "x.xlsx", "--inicio", "01/10/2026 09:00",
+                            "--fim", "01/10/2026 11:00", "--publicacao",
+                            "25/09/2026", "--disponibilizacao", "24/09/2026"])
+
+    assert main._agenda_da_rodada(args) == datas.Agenda(
+        "01/10/2026", "09:00:00", "01/10/2026", "11:00:00", "25/09/2026",
+        "24/09/2026")
+
+
+def _dia(delta: int) -> str:
+    return (datetime.date.today() + datetime.timedelta(days=delta)).strftime("%d/%m/%Y")
+
+
+def _com_perfil(cnj, perfil, agenda=None):
+    proc = processo(cnj)
+    proc.perfil = perfil
+    proc.agenda = agenda
+    return proc
+
+
+PENDENTE = config.PerfilTarefa("pendente-teste", "TAREFA X", status="Pendente")
+
+
+def test_pendente_com_conclusao_passada_e_recusado_antes_do_chrome():
+    # O Legal One recusa em cada processo; a rodada inteira viraria erro ate o
+    # disjuntor.
+    with pytest.raises(main.ErroDeUso, match="Pendente") as erro:
+        main._conferir_datas(datas.Agenda(inicio=_dia(-1)),
+                             [_com_perfil("A", PENDENTE)])
+    assert "2026!L2" in str(erro.value)
+
+
+def test_data_passada_com_cumprido_so_avisa(caplog):
+    main._conferir_datas(datas.Agenda(inicio=_dia(-7)),
+                         [_com_perfil("A", config.PERFIS["defesa-faturada"])])
+
+    assert "anterior a hoje" in caplog.text
+
+
+@pytest.mark.parametrize("agenda", [
+    datas.Agenda(), datas.Agenda(inicio=_dia(0)), datas.Agenda(inicio=_dia(3))])
+def test_hoje_ou_futuro_passa_sem_aviso(agenda, caplog):
+    main._conferir_datas(agenda, [_com_perfil("A", PENDENTE)])
+
+    assert "anterior a hoje" not in caplog.text
+
+
+def test_inicio_depois_da_conclusao_e_recusado():
+    with pytest.raises(main.ErroDeUso, match="depois da conclusao"):
+        main._conferir_datas(datas.Agenda(inicio=_dia(3), fim=_dia(2)),
+                             [_com_perfil("A", config.PERFIS["defesa-faturada"])])
+
+
+def test_datas_da_linha_ganham_das_da_rodada_na_conferencia():
+    # A rodada pede hoje; a linha, ontem, num perfil Pendente: e a da linha que
+    # vale, e ela e recusada.
+    with pytest.raises(main.ErroDeUso, match="Pendente"):
+        main._conferir_datas(
+            datas.Agenda(inicio=_dia(0)),
+            [_com_perfil("A", PENDENTE, datas.Agenda(fim=_dia(-1),
+                                                     inicio=_dia(-1)))])
 
 
 def test_trava_de_planilha_por_perfil():
@@ -315,6 +385,31 @@ def test_planilha_do_dia_marca_o_recadastro(registro, dados_tmp):
     # Celula vazia volta como None do openpyxl.
     assert [ws["A2"].value, ws["K2"].value] == ["A", None]
     assert [ws["A3"].value, ws["K3"].value] == ["B", "Sim"]
+
+
+def test_planilha_do_dia_mostra_a_tarefa_gravada_no_ledger(registro, dados_tmp):
+    # Os valores saem do que foi enviado, e nao do perfil de hoje: uma tarefa
+    # Pendente com outro responsavel precisa aparecer assim, mesmo com a mesma
+    # descricao de um perfil que diz Cumprido/Heloiza.
+    registro.con.execute(
+        "INSERT INTO processos (cnj, tarefa, situacao, id_legalone, quando, "
+        "  tipo, status, responsavel, data_inicio, data_fim) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("A", "FATURAMENTO FINAL", ledger_mod.OK, "111", "2026-07-30T10:00:00",
+         "Diversos", "Pendente", "Fulana de Tal", "01/08/2026 09:00:00",
+         "01/08/2026 09:30:00"),
+    )
+    registro.con.commit()
+
+    main._exportar_finais(registro, dias=["2026-07-30"])
+
+    ws = load_workbook(dados_tmp / "cadastrados_2026-07-30.xlsx").active
+    assert [ws["D2"].value, ws["E2"].value, ws["F2"].value] == [
+        "Pendente", "Diversos", "Fulana de Tal"]
+    # As datas entram depois das colunas antigas, que nao mudam de lugar.
+    assert [ws["L1"].value, ws["M1"].value] == ["INÍCIO", "CONCLUSÃO"]
+    assert [ws["L2"].value, ws["M2"].value] == ["01/08/2026 09:00:00",
+                                                "01/08/2026 09:30:00"]
 
 
 # --- modo relatorio ponta a ponta --------------------------------------------
@@ -557,3 +652,276 @@ def test_simulacao_nao_apaga_a_lista_das_rodadas_de_verdade(
     main.main(["--planilha", str(arq), "--limite", "1"])
 
     assert (dados_tmp / "nao_encontrados.csv").read_bytes() == antes
+
+
+# --- conferencia de tipo e responsavel no inicio da rodada -------------------
+
+def test_resolver_perfis_reescreve_como_o_legal_one_escreve():
+    pedido = config.PerfilTarefa("teste", "TAREFA X",
+                                 tipo="diversos > contato telefonico",
+                                 responsavel="heloiza")
+
+    resolucao = main._resolver_perfis(AutomadorFalso(), [pedido])
+
+    perfil = resolucao.aplicar(pedido)
+    assert (perfil.tipo, perfil.tipo_id, perfil.responsavel) == (
+        "Diversos / Contato Telefônico", "subtipo_9", "Heloiza Helena de Araujo")
+
+
+def test_resolver_perfis_junta_todos_os_problemas_numa_mensagem():
+    ruins = [
+        config.PerfilTarefa("a", "TAREFA A", tipo="Inexistente"),
+        config.PerfilTarefa("b", "TAREFA B", responsavel="Ana"),
+    ]
+
+    with pytest.raises(main.ErroDeUso) as erro:
+        main._resolver_perfis(AutomadorFalso(), ruins)
+    assert "TAREFA A" in str(erro.value) and "TAREFA B" in str(erro.value)
+
+
+def test_perfis_de_verdade_passam_pela_conferencia():
+    # Os perfis de producao tem que resolver sem ajuste, e no tipo que o
+    # formulario ja traz: e o que garante que faturamento e defesa continuam
+    # sendo cadastrados exatamente como antes.
+    perfis = list(config.PERFIS.values())
+    resolucao = main._resolver_perfis(AutomadorFalso(), perfis)
+
+    for perfil in map(resolucao.aplicar, perfis):
+        assert (perfil.tipo_id, perfil.responsavel) == (
+            "tipo_4", "Heloiza Helena de Araujo")
+
+
+def test_rodada_envia_a_tarefa_conferida(dados_tmp, monkeypatch, tmp_path):
+    arq = _planilha_real(tmp_path)
+    automador = AutomadorFalso({ACHADO: achou("111")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+
+    main.main(["--planilha", str(arq), "--executar", "--processo", ACHADO])
+
+    # O tipo_id e o que faz o formulario escolher (ou manter) o tipo; sem ele
+    # o automador so confere o que ja vem na tela.
+    assert automador.enviadas[0].tipo_id == "tipo_4"
+
+
+def test_tipo_que_nao_existe_para_antes_do_primeiro_cadastro(
+    dados_tmp, monkeypatch, tmp_path
+):
+    arq = _planilha_real(tmp_path)
+    automador = AutomadorFalso({ACHADO: achou("111")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+    monkeypatch.setitem(config.PERFIS, config.PERFIL_PADRAO, dataclasses.replace(
+        config.PERFIS[config.PERFIL_PADRAO], tipo="Tipo Que Nao Existe"))
+
+    assert main.main(["--planilha", str(arq), "--executar"]) == main.SAIDA_USO
+    assert automador.buscados == [] and automador.enviadas == []
+
+
+def test_so_buscar_nao_depende_da_conferencia(dados_tmp, monkeypatch, tmp_path):
+    # O pre-voo nao abre formulario; um tipo errado no perfil nao o impede.
+    arq = _planilha_real(tmp_path)
+    automador = AutomadorFalso({ACHADO: achou("111")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+    monkeypatch.setitem(config.PERFIS, config.PERFIL_PADRAO, dataclasses.replace(
+        config.PERFIS[config.PERFIL_PADRAO], tipo="Tipo Que Nao Existe"))
+
+    assert main.main(["--planilha", str(arq), "--so-buscar"]) == main.SAIDA_OK
+    assert ACHADO in automador.buscados
+
+
+# --- de onde vem a tarefa: perfil, flags, avulsa, coluna ---------------------
+
+PEDRO = "Pedro Henrique Braz Moreira"
+NATHALIA = "Nathalia Maria Gatto Pinto"
+
+
+def _args(*argv):
+    return main.argumentos(["--planilha", "x.xlsx", *argv])
+
+
+def test_flags_sobrepoem_o_perfil_sem_perder_descricao_e_trava():
+    perfil = main._perfil_da_rodada(_args("--tarefa", "defesa-faturada",
+                                          "--responsavel", NATHALIA))
+
+    assert (perfil.descricao, perfil.status, perfil.responsavel,
+            perfil.dica_arquivo) == ("DEFESA FATURADA", "Cumprido", NATHALIA,
+                                     "Defesa")
+
+
+def test_tarefa_avulsa():
+    perfil = main._perfil_da_rodada(_args(
+        "--descricao", "  CONFERIR   CUSTAS ", "--status", "pendente",
+        "--responsavel", PEDRO))
+
+    assert (perfil.nome, perfil.descricao, perfil.tipo, perfil.status,
+            perfil.responsavel, perfil.dica_arquivo) == (
+        config.NOME_AVULSA, "CONFERIR CUSTAS", "Diversos", "Pendente", PEDRO, "")
+
+
+@pytest.mark.parametrize("falta, argv", [
+    ("--status", ["--responsavel", PEDRO]),
+    ("--responsavel", ["--status", "Cumprido"]),
+    ("--status e --responsavel", []),
+])
+def test_tarefa_avulsa_exige_status_e_responsavel(falta, argv):
+    # Sem padrao escondido: uma tarefa nova nao cai em Cumprido/Heloiza.
+    with pytest.raises(main.ErroDeUso, match=falta):
+        main._perfil_da_rodada(_args("--descricao", "X", *argv))
+
+
+def test_descricao_nao_combina_com_tarefa():
+    with pytest.raises(main.ErroDeUso, match="nao combine com --tarefa"):
+        main._perfil_da_rodada(_args("--tarefa", "defesa-faturada",
+                                     "--descricao", "X", "--status", "Cumprido",
+                                     "--responsavel", PEDRO))
+
+
+def test_status_invalido_para_na_cli():
+    with pytest.raises(SystemExit) as saida:
+        _args("--status", "Feito")
+    assert saida.value.code == 2
+
+
+def test_arquivo_de_perfis_com_problema_e_erro_de_uso(dados_tmp, monkeypatch, caplog):
+    monkeypatch.setattr(config, "ERRO_PERFIS", "tarefas.toml: [x]: falta status")
+
+    assert main.main(["--planilha", "x.xlsx"]) == main.SAIDA_USO
+    assert "falta status" in caplog.text
+
+
+def test_modo_auto_aplica_as_flags_em_cada_perfil(registro):
+    processos = [processo("A", tarefa="DEFESA FATURADA"),
+                 processo("B", tarefa="FATURAMENTO FINAL")]
+
+    main._atribuir_perfis(_args("--tarefa", "auto", "--responsavel", PEDRO),
+                          config.PERFIL_AUTO, processos)
+
+    assert [(p.perfil.descricao, p.perfil.responsavel) for p in processos] == [
+        ("DEFESA FATURADA", PEDRO), ("FATURAMENTO FINAL", PEDRO)]
+
+
+def _da_planilha(cnj, descricao, tipo="", status="", responsavel=""):
+    proc = processo(cnj, tarefa=descricao)
+    proc.campos_tarefa = {"tipo": tipo, "status": status, "responsavel": responsavel}
+    return proc
+
+
+def test_modo_planilha_linha_ganha_de_flag_que_ganha_de_perfil():
+    processos = [
+        # Tudo na linha.
+        _da_planilha("A", "CONFERIR CUSTAS", "Diversos / Contato Telefônico",
+                     "Pendente", NATHALIA),
+        # Linha sem responsavel: vale a flag.
+        _da_planilha("B", "CONFERIR CUSTAS", status="Pendente"),
+        # Descricao de um perfil, escrita de outro jeito: o perfil completa o
+        # status, e a descricao passa a ser a do perfil (e a chave do ledger).
+        _da_planilha("C", "defesa  faturada"),
+    ]
+
+    main._atribuir_perfis(_args("--tarefa", "planilha", "--responsavel", PEDRO),
+                          config.PERFIL_PLANILHA, processos)
+
+    assert [(p.tarefa, p.perfil.tipo, p.perfil.status, p.perfil.responsavel)
+            for p in processos] == [
+        ("CONFERIR CUSTAS", "Diversos / Contato Telefônico", "Pendente", NATHALIA),
+        ("CONFERIR CUSTAS", "Diversos", "Pendente", PEDRO),
+        ("DEFESA FATURADA", "Diversos", "Cumprido", PEDRO),
+    ]
+
+
+def test_modo_planilha_linha_incompleta_e_erro_com_a_origem():
+    processos = [_da_planilha("A", "CONFERIR CUSTAS", responsavel=PEDRO),
+                 _da_planilha("B", "CONFERIR CUSTAS", status="Feito",
+                              responsavel=PEDRO)]
+
+    with pytest.raises(main.ErroDeUso) as erro:
+        main._atribuir_perfis(_args("--tarefa", "planilha"),
+                              config.PERFIL_PLANILHA, processos)
+    assert "sem status" in str(erro.value)
+    assert "status 'Feito' nao existe" in str(erro.value)
+    assert "2026!L2" in str(erro.value)
+
+
+def test_rodada_no_modo_planilha_ponta_a_ponta(dados_tmp, monkeypatch, tmp_path):
+    """Planilha com as colunas da tarefa -> conferencia -> formulario -> ledger."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Tarefas"
+    ws.append(["PROCESSO", "DESCRIÇÃO DA TAREFA", "TIPO DA TAREFA",
+               "STATUS DA TAREFA", "RESPONSÁVEL DA TAREFA"])
+    ws.append([ACHADO, "CONFERIR CUSTAS", "diversos > contato telefonico",
+               "pendente", "nathalia"])
+    ws.append([CORRIGIDO, "CONFERIR CUSTAS", None, "Cumprido", "pedro"])
+    arq = tmp_path / "Tarefas.xlsx"
+    wb.save(arq)
+    automador = AutomadorFalso({ACHADO: achou("111"), CORRIGIDO: achou("222")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+
+    assert main.main(["--planilha", str(arq), "--tarefa", "planilha",
+                      "--executar"]) == main.SAIDA_OK
+
+    # O que foi ao formulario ja vem escrito como o Legal One escreve.
+    assert [(t.descricao, t.tipo, t.tipo_id, t.status, t.responsavel)
+            for t in automador.enviadas] == [
+        ("CONFERIR CUSTAS", "Diversos / Contato Telefônico", "subtipo_9",
+         "Pendente", NATHALIA),
+        ("CONFERIR CUSTAS", "Diversos", "tipo_4", "Cumprido", PEDRO),
+    ]
+    relatorio = {linha["PROCESSO"]: linha
+                 for linha in _linhas_csv(dados_tmp / "relatorio.csv")}
+    assert relatorio[ACHADO]["RESPONSAVEL"] == NATHALIA
+    assert relatorio[ACHADO]["TIPO_TAREFA"] == "Diversos / Contato Telefônico"
+    assert relatorio[CORRIGIDO]["STATUS_TAREFA"] == "Cumprido"
+
+
+def test_data_mal_escrita_numa_linha_e_erro_com_a_origem():
+    proc = _da_planilha("A", "CONFERIR CUSTAS", status="Pendente", responsavel=PEDRO)
+    proc.campos_tarefa["inicio"] = "31/02/2026"
+
+    with pytest.raises(main.ErroDeUso, match="inicio") as erro:
+        main._atribuir_perfis(_args("--tarefa", "planilha"),
+                              config.PERFIL_PLANILHA, [proc])
+    assert "2026!L2" in str(erro.value)
+
+
+def test_rodada_com_datas_da_linha_e_da_cli(dados_tmp, monkeypatch, tmp_path):
+    """Datas na planilha por cima das da linha de comando, ate o ledger."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Tarefas"
+    ws.append(["PROCESSO", "DESCRIÇÃO DA TAREFA", "STATUS DA TAREFA",
+               "RESPONSÁVEL DA TAREFA", "INÍCIO DA TAREFA",
+               "PUBLICAÇÃO DA TAREFA"])
+    amanha = datetime.date.today() + datetime.timedelta(days=1)
+    ws.append([ACHADO, "CONFERIR CUSTAS", "Pendente", "pedro",
+               datetime.datetime.combine(amanha, datetime.time(16, 0)), None])
+    ws.append([CORRIGIDO, "CONFERIR CUSTAS", "Pendente", "pedro", None,
+               "25/09/2026"])
+    arq = tmp_path / "Tarefas.xlsx"
+    wb.save(arq)
+    automador = AutomadorFalso({ACHADO: achou("111"), CORRIGIDO: achou("222")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+    dia = amanha.strftime("%d/%m/%Y")
+
+    assert main.main(["--planilha", str(arq), "--tarefa", "planilha", "--executar",
+                      "--data", "09:00", "--publicacao", "20/09/2026"]) == main.SAIDA_OK
+
+    a, b = automador.enviadas
+    # Linha 1: inicio da linha (amanha 16h), 30 min de duracao, publicacao da CLI.
+    assert (a.data_inicio, a.hora_inicio, a.data_fim, a.hora_fim,
+            a.data_publicacao, a.confirmar_data_passada) == (
+        dia, "16:00:00", dia, "16:30:00", "20/09/2026", True)
+    # Linha 2: hora da CLI no dia de hoje, publicacao da linha. So a hora foi
+    # pedida, o dia nao: data passada nao seria confirmada.
+    hoje = datetime.date.today().strftime("%d/%m/%Y")
+    assert (b.data_inicio, b.hora_inicio, b.hora_fim, b.data_publicacao,
+            b.confirmar_data_passada) == (
+        hoje, "09:00:00", "09:30:00", "25/09/2026", False)
+    relatorio = {linha["PROCESSO"]: linha
+                 for linha in _linhas_csv(dados_tmp / "relatorio.csv")}
+    assert relatorio[ACHADO]["DATA_INICIO"] == f"{dia} 16:00:00"
+    assert relatorio[CORRIGIDO]["DATA_PUBLICACAO"] == "25/09/2026"

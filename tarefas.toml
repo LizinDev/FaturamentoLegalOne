@@ -1,0 +1,38 @@
+# Perfis de tarefa do cadastro em lote no Legal One.
+#
+# Cada secao e um perfil, escolhido com --tarefa <nome da secao>. Os campos:
+#
+#   descricao     texto do campo Descricao. Identifica a tarefa no ledger e na
+#                 checagem de duplicata: trocar a descricao de um perfil faz as
+#                 rodadas seguintes tratarem a tarefa como outra.
+#   tipo          caminho na arvore de tipos do Legal One: "Diversos" para um
+#                 tipo, "Diversos / Contato Telefônico" para um subtipo (">"
+#                 tambem serve de separador). O nome sozinho vale se for unico.
+#   status        Pendente, Cumprido, Não cumprido, Cancelado, Iniciado ou
+#                 Recusado (acento e caixa nao importam).
+#   responsavel   usuario ativo do Legal One. Basta parte do nome enquanto so
+#                 um usuario casar.
+#   dica_arquivo  (opcional) trecho que precisa aparecer no caminho da planilha.
+#                 E a trava contra rodar a planilha de uma tarefa com o perfil
+#                 de outra.
+#
+# Tipo e responsavel sao conferidos no Legal One antes do primeiro cadastro:
+# o que nao casar com exatamente uma opcao para a rodada com a lista do que
+# existe. Nomes reservados, que nao podem virar secao: auto, planilha, avulsa.
+#
+# Mudar um perfil vale para os cadastros daqui para a frente; o ledger guarda o
+# que foi enviado em cada cadastro antigo.
+
+[faturamento-final]
+descricao = "FATURAMENTO FINAL"
+tipo = "Diversos"
+status = "Cumprido"
+responsavel = "Heloiza Helena de Araujo"
+dica_arquivo = "Faturamento"
+
+[defesa-faturada]
+descricao = "DEFESA FATURADA"
+tipo = "Diversos"
+status = "Cumprido"
+responsavel = "Heloiza Helena de Araujo"
+dica_arquivo = "Defesa"

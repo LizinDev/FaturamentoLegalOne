@@ -1,7 +1,7 @@
 """Automacao do Legal One: busca de processo e cadastro da tarefa."""
 import contextlib
 import dataclasses
-import datetime
+import json
 import logging
 import os
 import time
@@ -12,6 +12,7 @@ from selenium.common.exceptions import (
     ElementClickInterceptedException,
     NoSuchWindowException,
     TimeoutException,
+    WebDriverException,
 )
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -19,6 +20,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+import catalogo
 import config
 
 logger = logging.getLogger(__name__)
@@ -119,6 +121,50 @@ def interpretar_busca(linhas: list[dict], cnj: str) -> ResultadoBusca:
     )
 
 
+# O que a pagina diz depois do Salvar. Ver situacao_pos_salvar.
+SALVOU = "salvou"
+PEDIU_CONFIRMACAO = "pediu_confirmacao"
+RECUSOU = "recusou"
+
+# O formulario devolvido pelo servidor, com aviso ou erro. So chega aqui quem
+# nao foi gravado: o cadastro aceito redireciona para outra pagina.
+CAMINHO_FORMULARIO_DEVOLVIDO = "/processos/tarefas/edit"
+
+# Trecho do aviso de data passada: "A data de 'Inicio' do compromisso ou de
+# 'Conclusao' da tarefa e anterior a data atual. Deseja salvar mesmo assim?"
+TRECHO_AVISO_DATA_PASSADA = "anterior à data atual"
+
+
+def situacao_pos_salvar(url: str, aviso: str, erros: str) -> str | None:
+    """Le a pagina depois do Salvar: SALVOU, PEDIU_CONFIRMACAO, RECUSOU ou None.
+
+    None quer dizer "ainda nao da para afirmar" — o POST nao voltou, ou o
+    formulario voltou e o aviso ainda nao apareceu. Separada do Selenium, como
+    interpretar_busca, porque e aqui que se decide se um cadastro vira 'ok'.
+
+    Ate a 1.8 o sucesso era "saiu de CreateFromProcesso". Mas o servidor devolve
+    o formulario em /processos/tarefas/Edit quando recusa (erro de validacao) ou
+    quando pede confirmacao (data anterior a hoje), e essa URL ja satisfazia a
+    regra: testado em 29/09/2026 na pasta de teste, era esse o "cadastro
+    fantasma" da virada do dia — o aviso ficava na tela sem resposta e o
+    ledger gravava 'ok'. O cadastro aceito vai para outro endereco
+    (/processos/compromissotarefa, que mostra "erro inesperado no servidor" mas
+    com a tarefa gravada).
+    """
+    caminho = urllib.parse.urlparse(url).path.lower().rstrip("/")
+    if "createfromprocesso" in caminho:
+        return None
+    if caminho.endswith(CAMINHO_FORMULARIO_DEVOLVIDO):
+        # O aviso tem prioridade: com ele na tela o formulario ainda pode ser
+        # gravado, entao nao e recusa.
+        if aviso:
+            return PEDIU_CONFIRMACAO
+        if erros:
+            return RECUSOU
+        return None
+    return SALVOU
+
+
 def conectar() -> webdriver.Chrome:
     """Conecta ao Chrome ja aberto em modo debug (nunca abre outra instancia)."""
     # Em maquinas com chromedriver antigo instalado via chocolatey, o binario do
@@ -137,14 +183,16 @@ def conectar() -> webdriver.Chrome:
 
 
 class AutomadorLegalOne:
-    """Busca processos e cadastra a tarefa do perfil recebido."""
+    """Busca processos e cadastra a tarefa que receber em cada chamada.
 
-    def __init__(self, driver: webdriver.Chrome, data_tarefa: str | None,
-                 perfil: "config.PerfilTarefa"):
+    Nao guarda perfil nem data: quem decide a tarefa de cada processo e a
+    rodada, que tambem grava no ledger o que foi enviado. Com o automador
+    decidindo a data por conta propria, o ledger nao teria como saber qual foi.
+    """
+
+    def __init__(self, driver: webdriver.Chrome):
         self.driver = driver
         self.wait = WebDriverWait(driver, config.TIMEOUT_PADRAO)
-        self.data_tarefa = data_tarefa
-        self.perfil = perfil
         self._aba: str | None = None
 
     # --- infraestrutura ------------------------------------------------------
@@ -325,7 +373,11 @@ class AutomadorLegalOne:
     # --- preenchimento -------------------------------------------------------
 
     def _preencher_data(self, campo_id: str, data: str) -> None:
-        """O datepicker ignora eventos normais do Selenium; via JS funciona."""
+        """O datepicker ignora eventos normais do Selenium; via JS funciona.
+
+        Serve tambem para os campos de hora (HrInicio/HrFinal), que ficam
+        colados ao datepicker e sao lidos pelo mesmo evento de change.
+        """
         campo = self.wait.until(EC.visibility_of_element_located((By.ID, campo_id)))
         self.driver.execute_script("arguments[0].value = arguments[1];", campo, data)
         self.driver.execute_script(
@@ -361,8 +413,13 @@ class AutomadorLegalOne:
             and d.find_element(By.ID, "StatusId").get_attribute("value") == esperado
         ))
 
-    def _preencher_responsavel(self, busca: str, esperado: str) -> None:
-        """Troca o envolvido padrao (o usuario logado) pelo responsavel da tarefa."""
+    def _preencher_responsavel(self, nome: str) -> None:
+        """Troca o envolvido padrao (o usuario logado) pelo responsavel da tarefa.
+
+        nome e o nome completo, como o Legal One o escreve (a checagem do inicio
+        da rodada ja o resolveu). Digita-lo inteiro deixa um resultado so na
+        lista, que mostra no maximo 10.
+        """
         campo = self.wait.until(EC.visibility_of_element_located((
             By.CSS_SELECTOR, "input[id*='__EnvolvidoText']"
         )))
@@ -371,21 +428,168 @@ class AutomadorLegalOne:
         )
         campo.clear()
         self.wait.until(lambda d: not campo.get_attribute("value"))
-        campo.send_keys(busca)
+        campo.send_keys(nome)
         # Debounce do lookup do NovaJus: a busca so dispara depois da pausa e
         # nao ha estado no DOM para observar antes do ENTER.
         time.sleep(config.DEBOUNCE_DELAY)
         campo.send_keys(Keys.ENTER)
 
-        linha = self.wait.until(EC.element_to_be_clickable((
-            By.XPATH,
-            f"//td[@data-val-field='ContatoNome' and normalize-space()='{esperado}']",
-        )))
-        linha.click()
+        # A linha e achada comparando o texto em Python, e nao montando um
+        # XPath com o nome: um apostrofo no nome quebraria a expressao.
+        def linha_do_nome(d):
+            for td in d.find_elements(
+                By.CSS_SELECTOR, "td[data-val-field='ContatoNome']"
+            ):
+                if td.is_displayed() and " ".join(td.text.split()) == nome:
+                    return td
+            return False
+
+        self.wait.until(linha_do_nome).click()
 
         self.wait.until(lambda d: d.find_element(
             By.CSS_SELECTOR, "input[id*='__EnvolvidoText']"
-        ).get_attribute("value") == esperado)
+        ).get_attribute("value") == nome)
+
+    def _esperar_ajax(self) -> None:
+        """Espera as requisicoes do jQuery da pagina terminarem.
+
+        Escolher um subtipo dispara a sugestao de Prazo/Data de publicacao, que
+        chega por ajax e pode recalcular inicio e fim. Escrever as datas antes
+        dela voltar seria desfeito em silencio.
+        """
+        with contextlib.suppress(TimeoutException):
+            self.wait.until(lambda d: d.execute_script(
+                "return !window.jQuery || window.jQuery.active === 0;"
+            ))
+
+    def _selecionar_tipo(self, tarefa: "config.Tarefa") -> None:
+        """Escolhe o tipo na arvore do lookup, se ele nao for o que ja vem.
+
+        A arvore tem os subtipos escondidos ate o pai ser expandido, e cada
+        linha tem o id do tipo (tr#tipo_4, tr#subtipo_9). Digitar o texto no
+        campo nao serve: como no status, so o clique na linha vincula o id.
+        """
+        if not tarefa.tipo_id:
+            # Tarefa que nao passou pela checagem: so confere o que ja vem, como
+            # ate a 1.8 — nunca escolhe um tipo que ninguem conferiu.
+            texto = self.driver.find_element(By.ID, "TipoText").get_attribute("value")
+            if texto != tarefa.tipo:
+                raise RuntimeError(
+                    f"Tipo padrao mudou: esperava {tarefa.tipo!r}, veio {texto!r}"
+                )
+            return
+        atual = self.driver.find_element(By.ID, "TipoId").get_attribute("value")
+        if atual == tarefa.tipo_id:
+            return
+
+        botao = self.wait.until(EC.element_to_be_clickable((
+            By.CSS_SELECTOR, "#lookup_tipo .lookup-button.lookup-show"
+        )))
+        self.driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});", botao
+        )
+        botao.click()
+        linha = self.wait.until(EC.presence_of_element_located((
+            By.CSS_SELECTOR, f"tr[id='{tarefa.tipo_id}']"
+        )))
+        if not linha.is_displayed():
+            # Subtipo: o pai vem recolhido. A classe child-of-<pai> diz qual e.
+            pai = next((c.removeprefix("child-of-")
+                        for c in (linha.get_attribute("class") or "").split()
+                        if c.startswith("child-of-")), "")
+            if not pai:
+                raise RuntimeError(
+                    f"tipo {tarefa.tipo_id} escondido e sem pai na arvore"
+                )
+            self.driver.find_element(
+                By.CSS_SELECTOR, f"tr[id='{pai}'] .expander"
+            ).click()
+            self.wait.until(lambda d: linha.is_displayed())
+        linha.find_element(By.TAG_NAME, "td").click()
+
+        self.wait.until(lambda d: d.find_element(By.ID, "TipoId")
+                        .get_attribute("value") == tarefa.tipo_id)
+        self._esperar_ajax()
+
+    def _conferir_datas(self, tarefa: "config.Tarefa") -> None:
+        """Confere, logo antes do Salvar, que as datas sao as pedidas.
+
+        Subtipo com contagem de prazo recalcula inicio e fim por conta propria.
+        Uma tarefa gravada com data diferente da pedida e pior do que um erro,
+        porque passa por cadastro certo.
+        """
+        pedidas = {"DtInicial": tarefa.data_inicio, "DtFinal": tarefa.data_fim,
+                   "HrInicio": tarefa.hora_inicio, "HrFinal": tarefa.hora_fim,
+                   "DtPublicacao": tarefa.data_publicacao,
+                   "AvailableDate": tarefa.data_disponibilizacao}
+        for campo, valor in pedidas.items():
+            if valor is None:
+                continue
+            atual = self.driver.find_element(By.ID, campo).get_attribute("value")
+            if atual != valor:
+                raise RuntimeError(
+                    f"o formulario trocou {campo}: pedi {valor!r}, ficou {atual!r}"
+                )
+
+    # --- listas para a checagem do inicio da rodada ---------------------------
+
+    URL_TIPOS = "/config/TipoAndamentoCompromissoTarefa/LookupTreeTiposTarefa"
+    # O mesmo endereco que o campo Nome dos envolvidos usa. Sem pageSize o
+    # Legal One responde 500.
+    URL_USUARIOS = ("/config/Usuarios/LookupGridUsuario"
+                    "?ativosOnly=True&pageSize=50&term={}")
+
+    def _buscar_json(self, caminho: str) -> dict:
+        """GET num endpoint de lookup, com a sessao do Chrome.
+
+        Vai por fetch dentro da pagina, e nao pelo Python, porque e a sessao do
+        navegador que esta logada. Por isso a aba precisa estar no Legal One.
+        """
+        if not self.driver.current_url.startswith(config.BASE_URL):
+            # Nao a raiz: ela redireciona para firm.legalone.com.br/home, outro
+            # dominio, e o fetch dali pedia a lista ao host errado (voltava a
+            # pagina HTML dele). A busca de processos fica no novajus.
+            self._ir_para(config.URL_BUSCA.format(cnj=""))
+        # URL absoluta: se mesmo assim a aba estiver noutro dominio, o fetch
+        # falha como cross-origin, em vez de responder a pagina de outro site.
+        caminho = config.BASE_URL + caminho
+        resposta = self.driver.execute_async_script("""
+        const [url, fim] = arguments;
+        fetch(url, {credentials: 'same-origin',
+                    headers: {'X-Requested-With': 'XMLHttpRequest'}})
+          .then(r => r.text().then(t => fim({status: r.status, url: r.url, texto: t})))
+          .catch(e => fim({status: 0, url: '', texto: String(e)}));
+        """, caminho)
+        final = (resposta.get("url") or "").lower()
+        if "login" in final or "account/signin" in final:
+            raise SessaoExpirada(
+                "O Legal One redirecionou para a tela de login. "
+                "Faca login no Chrome e repita o comando."
+            )
+        if resposta.get("status") != 200:
+            raise RuntimeError(
+                f"{caminho} respondeu {resposta.get('status')}: "
+                f"{(resposta.get('texto') or '')[:200]}"
+            )
+        try:
+            return json.loads(resposta["texto"])
+        except ValueError:
+            raise RuntimeError(f"{caminho} nao devolveu JSON")
+
+    def listar_tipos(self) -> list["catalogo.Tipo"]:
+        """A arvore inteira de tipos e subtipos de tarefa (~850 itens)."""
+        return catalogo.tipos_da_arvore(self._buscar_json(self.URL_TIPOS)["Rows"])
+
+    def buscar_usuarios(self, termo: str) -> list[str]:
+        """Nomes dos usuarios ativos que a busca do Legal One casa com o termo.
+
+        So o nome sai daqui: a resposta traz tambem CPF e e-mail, que a
+        automacao nao usa e nao devem parar em log.
+        """
+        dados = self._buscar_json(
+            self.URL_USUARIOS.format(urllib.parse.quote(termo))
+        )
+        return [str(linha["ContatoNome"]) for linha in dados.get("Rows", [])]
 
     def _preencher_descricao(self, descricao: str) -> None:
         """Digita a descricao, repetindo se o formulario apagar o texto.
@@ -465,41 +669,110 @@ class AutomadorLegalOne:
             self._esperar_mascara_sumir()
             botao.click()
 
+    # Onde o Legal One poe as mensagens de recusa. O span-error-validation-message
+    # e o do erro de data/status ("O status selecionado nao pode ser
+    # 'Pendente'..."), e ficou de fora ate a 1.8 — a recusa passava por sucesso.
+    SELETOR_ERROS = (".field-validation-error, .validation-summary-errors, "
+                     ".alert-danger, .span-error-validation-message")
+
     def _erros_de_validacao(self) -> str:
+        # So conta mensagem visivel: o formulario pode trazer o span de erro
+        # montado e escondido, e ler texto escondido recusaria um cadastro bom.
         return self.driver.execute_script("""
-        return [...document.querySelectorAll(
-          '.field-validation-error, .validation-summary-errors, .alert-danger')]
+        return [...document.querySelectorAll(arguments[0])]
+          .filter(e => e.getClientRects().length > 0)
           .map(e => e.innerText.trim()).filter(t => t).join(' | ');
+        """, self.SELETOR_ERROS) or ""
+
+    def _aviso_na_tela(self) -> str:
+        """Texto do aviso modal do Legal One (Sim/Nao), ou "" se nao houver.
+
+        E um popup do proprio site, e nao um alert do navegador: o Selenium nao
+        o enxerga como alerta, e so a leitura do DOM o encontra.
+        """
+        return self.driver.execute_script("""
+        const ok = document.getElementById('popup_ok');
+        if (!ok || ok.getClientRects().length === 0) return '';
+        const caixa = document.getElementById('popup_message')
+          || document.getElementById('popup_container') || ok.parentElement;
+        const texto = (caixa.innerText || '').replace(/\\s+/g, ' ').trim();
+        return texto || '(aviso sem texto)';
         """) or ""
 
-    def cadastrar_tarefa(self, id_legalone: str, executar: bool,
-                         perfil: "config.PerfilTarefa | None" = None) -> str:
-        """Preenche o formulario da tarefa. So salva se executar=True.
+    def _responder_aviso(self, sim: bool) -> None:
+        botao = "popup_ok" if sim else "popup_cancel"
+        self.driver.execute_script(
+            "document.getElementById(arguments[0]).click();", botao
+        )
 
-        perfil sobrepoe o do automador — e assim que uma rodada unica cadastra
-        tarefas diferentes, uma por linha da planilha. Devolve uma descricao
-        curta do que foi feito.
+    def _esperar_resposta_do_salvar(self, confirmado: bool = False) -> str:
+        """Espera o Legal One dizer o que fez com o Salvar (ver situacao_pos_salvar).
+
+        confirmado: a espera e a de depois do Sim no aviso. Ai a pagina ainda e
+        o formulario devolvido enquanto o novo POST viaja, entao ficar parado
+        nela e incerteza (pode ter gravado), e nao recusa.
         """
-        perfil = perfil or self.perfil
+        def ler(d):
+            # No meio da navegacao do POST o script pode falhar por um instante
+            # (a pagina velha ja se foi, a nova ainda nao montou). Isso nao e
+            # resposta nenhuma: sem tolerar, um cadastro gravado viraria erro, e
+            # o --retentar o gravaria de novo.
+            try:
+                return situacao_pos_salvar(
+                    d.current_url, self._aviso_na_tela(), self._erros_de_validacao()
+                )
+            except WebDriverException:
+                return None
+
+        try:
+            return self.wait.until(ler)
+        except TimeoutException:
+            pass
+        erros = self._erros_de_validacao()
+        if erros:
+            raise RuntimeError(f"nao salvou: {erros}")
+        if confirmado or "CreateFromProcesso" in self.driver.current_url:
+            # O POST nem voltou: pode ter gravado. Ver SalvarIncerto.
+            raise SalvarIncerto("nao salvou: formulario nao avancou")
+        # O servidor devolveu o formulario, sem aviso nem erro legivel. Nao foi
+        # gravado — e antes da 1.8 isto virava 'ok'.
+        raise RuntimeError(
+            "nao salvou: o Legal One devolveu o formulario sem mensagem legivel"
+        )
+
+    def cadastrar_tarefa(self, id_legalone: str, executar: bool,
+                         tarefa: "config.Tarefa") -> str:
+        """Preenche o formulario com a tarefa recebida. So salva se executar=True.
+
+        Devolve uma descricao curta do que foi feito.
+        """
         self._ir_para(config.URL_NOVA_TAREFA.format(id=id_legalone))
 
-        self._preencher_descricao(perfil.descricao)
+        self._preencher_descricao(tarefa.descricao)
 
-        # Tipo e datas ja vem certos do formulario; confirmamos em vez de
-        # reescrever, para nao desfazer o vinculo de TipoId.
-        tipo = self.driver.find_element(By.ID, "TipoText").get_attribute("value")
-        if tipo != perfil.tipo:
-            raise RuntimeError(
-                f"Tipo padrao mudou: esperava {perfil.tipo!r}, veio {tipo!r}"
-            )
+        # O tipo vem antes das datas: um subtipo com contagem de prazo recalcula
+        # inicio e fim, e as datas pedidas tem que ser escritas por cima disso.
+        self._selecionar_tipo(tarefa)
+        # Publicacao e disponibilizacao tambem: o subtipo as preenche com hoje,
+        # e a publicacao, com prazo, pode recalcular inicio e fim de novo.
+        if tarefa.data_publicacao:
+            self._preencher_data("DtPublicacao", tarefa.data_publicacao)
+        if tarefa.data_disponibilizacao:
+            self._preencher_data("AvailableDate", tarefa.data_disponibilizacao)
+        if tarefa.data_publicacao or tarefa.data_disponibilizacao:
+            self._esperar_ajax()
 
-        data_tarefa = self.data_tarefa or datetime.date.today().strftime("%d/%m/%Y")
-        self._preencher_data("DtInicial", data_tarefa)
-        self._preencher_data("DtFinal", data_tarefa)
-        self._selecionar_status(perfil.status)
-        self._preencher_responsavel(
-            perfil.responsavel_busca, perfil.responsavel_esperado
-        )
+        self._preencher_data("DtInicial", tarefa.data_inicio)
+        self._preencher_data("DtFinal", tarefa.data_fim)
+        # Sem hora pedida, fica a que o formulario sugere — o comportamento de
+        # sempre. Hora so e escrita quando a tarefa traz uma.
+        if tarefa.hora_inicio:
+            self._preencher_data("HrInicio", tarefa.hora_inicio)
+        if tarefa.hora_fim:
+            self._preencher_data("HrFinal", tarefa.hora_fim)
+        self._selecionar_status(tarefa.status)
+        self._preencher_responsavel(tarefa.responsavel)
+        self._conferir_datas(tarefa)
 
         erros = self._erros_de_validacao()
         if erros:
@@ -510,15 +783,36 @@ class AutomadorLegalOne:
 
         self._clicar_salvar()
 
-        # Sucesso = sai do formulario de criacao. Se continuar nele, a pagina
-        # tem o motivo da recusa — ou o Salvar gravou e so a navegacao travou.
-        try:
-            self.wait.until(lambda d: "CreateFromProcesso" not in d.current_url)
-        except TimeoutException:
-            erros = self._erros_de_validacao()
-            if erros:
-                raise RuntimeError(f"nao salvou: {erros}")
-            raise SalvarIncerto("nao salvou: formulario nao avancou")
+        situacao = self._esperar_resposta_do_salvar()
+        confirmou = False
+        if situacao == PEDIU_CONFIRMACAO:
+            aviso = self._aviso_na_tela()
+            # So confirma o que foi pedido de proposito. Sem --data, uma data
+            # passada so aparece num processo que atravessou a meia-noite: ai o
+            # certo e virar erro e ser refeito com a data do dia, e nao gravar
+            # uma tarefa com a data de ontem.
+            if not (tarefa.confirmar_data_passada
+                    and TRECHO_AVISO_DATA_PASSADA in aviso):
+                self._responder_aviso(sim=False)
+                raise RuntimeError(f"nao salvou: o Legal One pediu confirmacao: {aviso}")
+            self._responder_aviso(sim=True)
+            confirmou = True
+            # Sem esperar o aviso sair, a leitura seguinte o acharia ainda na
+            # tela e tomaria o mesmo aviso por um segundo.
+            with contextlib.suppress(TimeoutException):
+                self.wait.until(lambda d: not self._aviso_na_tela())
+            situacao = self._esperar_resposta_do_salvar(confirmado=True)
+            if situacao == PEDIU_CONFIRMACAO:
+                segundo = self._aviso_na_tela()
+                self._responder_aviso(sim=False)
+                raise RuntimeError(
+                    f"nao salvou: segundo aviso depois de confirmar: {segundo}"
+                )
+
+        if situacao == RECUSOU:
+            raise RuntimeError(f"nao salvou: {self._erros_de_validacao()}")
 
         self._checar_sessao()
+        if confirmou:
+            return "cadastrada (data anterior a hoje confirmada)"
         return "cadastrada"

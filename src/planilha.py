@@ -1,6 +1,7 @@
 """Leitura da planilha de cobrancas -> lista de processos unicos."""
 import collections
 import dataclasses
+import datetime
 import logging
 import re
 from collections.abc import Callable
@@ -9,6 +10,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 import config
+import datas
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,14 @@ class Processo:
     # Onde o processo aparece, no formato "aba!Lnn" — um processo repetido em
     # varias linhas/abas vira uma entrada so, com todas as origens.
     linhas: list[str] = dataclasses.field(default_factory=list)
+    # Com --tarefa planilha: tipo, status, responsavel e datas como vieram das
+    # colunas "... DA TAREFA" da linha ("" onde a celula estava vazia).
+    campos_tarefa: dict[str, str] = dataclasses.field(default_factory=dict)
+    # O perfil completo da tarefa deste processo. Quem le a planilha nao o
+    # preenche: e a preparacao da rodada que junta linha, flags e tarefas.toml.
+    perfil: "config.PerfilTarefa | None" = None
+    # As datas pedidas na propria linha (modo planilha); por cima das da rodada.
+    agenda: "datas.Agenda | None" = None
 
     @property
     def origem(self) -> str:
@@ -90,6 +100,7 @@ def ler(
     tipo_contem: str | None = None,
     status_planilha: str | None = None,
     tarefa_da_linha: Callable[[str], str | None] | None = None,
+    colunas_da_tarefa: bool = False,
 ) -> list[Processo]:
     """Le a planilha e devolve os processos unicos, na ordem de aparicao.
 
@@ -102,6 +113,13 @@ def ler(
                        (processo, tarefa): o mesmo numero que aparece como defesa
                        e como faturamento precisa das duas tarefas, e deduplicar
                        so pelo numero perderia uma delas.
+    colunas_da_tarefa — a tarefa vem das colunas "... DA TAREFA" (modo
+                       --tarefa planilha). A descricao e obrigatoria por linha:
+                       linha sem ela e pulada, com aviso. A deduplicacao e por
+                       (processo, descricao), e o mesmo par com tipo, status ou
+                       responsavel diferentes em duas linhas e erro — o ledger
+                       guarda um cadastro por par, e escolher um dos dois seria
+                       chute.
     """
     caminho = Path(caminho)
     if not caminho.is_file():
@@ -122,6 +140,9 @@ def ler(
         por_chave: dict[tuple[str, str], Processo] = {}
         total_linhas = 0
         nao_reconhecidos: collections.Counter = collections.Counter()
+        sem_descricao = 0
+        abas_com_descricao = 0
+        conflitos: list[str] = []
 
         for nome in alvo:
             ws = wb[nome]
@@ -136,6 +157,13 @@ def ler(
                             nome, config.COLUNA_PROCESSO,
                         )
                         break
+                    if colunas_da_tarefa:
+                        if config.COLUNA_DESCRICAO_TAREFA in indices:
+                            abas_com_descricao += 1
+                        else:
+                            logger.warning("Aba %r sem coluna %r — ignorada",
+                                           nome, config.COLUNA_DESCRICAO_TAREFA)
+                            break
                     continue
 
                 bruto = _celula(linha, indices, config.COLUNA_PROCESSO)
@@ -151,7 +179,27 @@ def ler(
                     continue
 
                 tarefa = ""
-                if tarefa_da_linha is not None:
+                campos: dict[str, str] = {}
+                if colunas_da_tarefa:
+                    tarefa = _celula(linha, indices, config.COLUNA_DESCRICAO_TAREFA)
+                    if not tarefa:
+                        sem_descricao += 1
+                        continue
+                    campos = {
+                        "tipo": _celula(linha, indices, config.COLUNA_TIPO_TAREFA),
+                        "status": _celula(linha, indices, config.COLUNA_STATUS_TAREFA),
+                        "responsavel": _celula(linha, indices,
+                                               config.COLUNA_RESPONSAVEL_TAREFA),
+                        "inicio": _celula_data(linha, indices,
+                                               config.COLUNA_INICIO_TAREFA),
+                        "fim": _celula_data(linha, indices,
+                                            config.COLUNA_CONCLUSAO_TAREFA),
+                        "publicacao": _celula_data(linha, indices,
+                                                   config.COLUNA_PUBLICACAO_TAREFA),
+                        "disponibilizacao": _celula_data(
+                            linha, indices, config.COLUNA_DISPONIBILIZACAO_TAREFA),
+                    }
+                elif tarefa_da_linha is not None:
                     tarefa = tarefa_da_linha(tipo) or ""
                     if not tarefa:
                         # Pular e mais seguro do que chutar uma tarefa: a coluna
@@ -166,8 +214,14 @@ def ler(
                 proc = por_chave.get((cnj, tarefa))
                 if proc is None:
                     proc = Processo(cnj=cnj, cnj_original=bruto, formato_ok=ok,
-                                    tarefa=tarefa)
+                                    tarefa=tarefa, campos_tarefa=campos)
                     por_chave[(cnj, tarefa)] = proc
+                elif campos != proc.campos_tarefa:
+                    conflitos.append(
+                        f"{bruto} / {tarefa!r}: {proc.linhas[0]} "
+                        f"{_resumo(proc.campos_tarefa)} x {nome}!L{n_linha} "
+                        f"{_resumo(campos)}"
+                    )
 
                 if tipo and tipo not in proc.tipos_cobranca:
                     proc.tipos_cobranca.append(tipo)
@@ -177,12 +231,27 @@ def ler(
     finally:
         wb.close()
 
+    if colunas_da_tarefa and not abas_com_descricao:
+        raise ValueError(
+            f"Nenhuma aba tem a coluna {config.COLUNA_DESCRICAO_TAREFA!r}, que o "
+            f"modo --tarefa planilha exige."
+        )
+    if conflitos:
+        raise ValueError(
+            "O mesmo processo pede a mesma tarefa com valores diferentes:\n  "
+            + "\n  ".join(conflitos[:20])
+            + (f"\n  (e mais {len(conflitos) - 20})" if len(conflitos) > 20 else "")
+        )
+
     processos = list(por_chave.values())
     invalidos = sum(1 for p in processos if not p.formato_ok)
     logger.info(
         "Planilha lida: %d linha(s) -> %d processo(s) unico(s) (%d fora do padrao CNJ)",
         total_linhas, len(processos), invalidos,
     )
+    if sem_descricao:
+        logger.warning("%d linha(s) puladas por %s vazia",
+                       sem_descricao, config.COLUNA_DESCRICAO_TAREFA)
     if nao_reconhecidos:
         logger.warning(
             "%d linha(s) puladas por TIPO DE COBRANCA sem tarefa correspondente: %s",
@@ -191,3 +260,29 @@ def ler(
                       for valor, n in nao_reconhecidos.most_common()),
         )
     return processos
+
+
+def _celula_data(linha, indices: dict[str, int], coluna: str) -> str:
+    """Celula de data/hora como texto DD/MM/AAAA [HH:MM:SS] ("" se vazia).
+
+    O openpyxl devolve celula de data como datetime, e str() dela daria
+    "2026-09-29 00:00:00". Texto digitado passa como esta: quem o le e
+    interpreta, com as mensagens de erro, e o datas.py. Meia-noite e "sem hora"
+    — e como o Excel guarda uma data sem hora.
+    """
+    i = indices.get(coluna)
+    valor = linha[i] if i is not None and i < len(linha) else None
+    if isinstance(valor, datetime.datetime):
+        if valor.time() == datetime.time(0):
+            return valor.strftime("%d/%m/%Y")
+        return valor.strftime("%d/%m/%Y %H:%M:%S")
+    if isinstance(valor, datetime.date):
+        return valor.strftime("%d/%m/%Y")
+    if isinstance(valor, datetime.time):
+        return valor.strftime("%H:%M:%S")
+    return _celula(linha, indices, coluna)
+
+
+def _resumo(campos: dict[str, str]) -> str:
+    """Os campos preenchidos de uma linha, para a mensagem de conflito."""
+    return "(" + ", ".join(f"{k}={v}" for k, v in campos.items() if v) + ")"

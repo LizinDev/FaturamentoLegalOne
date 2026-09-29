@@ -4,37 +4,72 @@ Cadastra tarefas em lote nos processos listados numa planilha de cobranças,
 direto no Legal One (`hasson.novajus.com.br`), via Selenium.
 
 Para cada linha da planilha o programa busca o processo pelo número CNJ, abre o
-formulário de nova tarefa e preenche os valores do perfil escolhido.
+formulário de nova tarefa e preenche descrição, tipo, status, responsável e
+data da tarefa daquele processo.
 
 > Para operar no dia a dia — todas as flags, códigos de saída e o que fazer
 > quando algo dá errado —, veja o **[Manual de operação](MANUAL.md)**. Este
 > README explica as decisões de projeto por trás do comportamento.
 
-São **duas tarefas**, e três formas de dizer qual cadastrar:
+A tarefa pode vir de quatro lugares:
 
-| Perfil (`--tarefa`) | Descrição gravada | Exige no nome da planilha |
-| --- | --- | --- |
-| `faturamento-final` | `FATURAMENTO FINAL` | `Faturamento` |
-| `defesa-faturada` | `DEFESA FATURADA` | `Defesa` |
-| `auto` | a que a coluna `TIPO DE COBRANÇA` disser, linha a linha | — |
-
-O resto é igual nos dois:
-
-| Campo | Valor |
+| Como | De onde vem a tarefa |
 | --- | --- |
-| Tipo | `Diversos` |
-| Status | `Cumprido` |
-| Responsável | `Heloiza Helena de Araujo` |
-| Data (início e fim) | hoje (ou `--data`) |
+| `--tarefa PERFIL` | Um perfil do `tarefas.toml` (hoje `faturamento-final` e `defesa-faturada`) |
+| `--descricao "..."` | A própria linha de comando: uma tarefa avulsa, fora do arquivo |
+| `--tarefa auto` | O perfil que a coluna `TIPO DE COBRANÇA` de cada linha indicar |
+| `--tarefa planilha` | As colunas `DESCRIÇÃO DA TAREFA`, `TIPO DA TAREFA`, `STATUS DA TAREFA` e `RESPONSÁVEL DA TAREFA` de cada linha |
 
-Os perfis ficam em `PERFIS`, em `src/config.py`. São nomeados em vez de texto
-livre na linha de comando porque parear a planilha de uma tarefa com a descrição
-da outra criaria centenas de tarefas indevidas.
+`--tipo`, `--status` e `--responsavel` sobrepõem o perfil só naquela rodada. No
+modo planilha a ordem é **linha > flag > perfil**: a coluna da linha vale
+primeiro, a flag completa a coluna vazia, e se a descrição for a de um perfil do
+arquivo ele completa o resto.
 
-Pela mesma razão cada perfil exige um trecho no nome do arquivo (`dica_arquivo`):
-se você mandar a planilha de defesas com `--tarefa faturamento-final`, a rodada
-é abortada antes de começar. Quando o par estiver certo mas o arquivo não seguir
-a convenção de nome, `--forcar-planilha` passa por cima.
+Os dois perfis de produção têm os valores de sempre:
+
+| Perfil | Descrição | Tipo | Status | Responsável | Exige no nome da planilha |
+| --- | --- | --- | --- | --- | --- |
+| `faturamento-final` | `FATURAMENTO FINAL` | `Diversos` | `Cumprido` | `Heloiza Helena de Araujo` | `Faturamento` |
+| `defesa-faturada` | `DEFESA FATURADA` | `Diversos` | `Cumprido` | `Heloiza Helena de Araujo` | `Defesa` |
+
+### Por que perfis num arquivo, e por que exigir tanto
+
+Os perfis ficam no `tarefas.toml`, na raiz do repositório, e não no código:
+uma tarefa recorrente nova é uma seção a mais num texto, e o arquivo versionado
+faz as duas máquinas cadastrarem exatamente a mesma coisa. Tipo, status e
+responsável são **obrigatórios** em cada perfil, e chave desconhecida é erro —
+`responsável` com acento, digitado à mão, seria ignorado em silêncio e o perfil
+cairia num padrão que ninguém escolheu. Arquivo com problema vira código 2
+antes de a rodada começar.
+
+Pela mesma razão, a tarefa avulsa (`--descricao`) **exige** `--status` e
+`--responsavel`: uma tarefa nova que caísse em Cumprido e no nome da Heloiza
+por esquecimento passaria por certa.
+
+As colunas do modo planilha levam o sufixo `DA TAREFA` de propósito, e o modo
+só liga com `--tarefa planilha`. Planilha jurídica costuma ter uma coluna
+`RESPONSÁVEL` (o advogado do caso) ou `STATUS` (o do processo), e nenhuma delas
+pode mudar a tarefa sem alguém pedir. No mesmo espírito, o mesmo par (processo,
+descrição) com tipo, status ou responsável diferentes em duas linhas é erro de
+uso: o ledger guarda um cadastro por par, e ficar com um dos dois seria chute.
+
+Um perfil nomeado exige um trecho no nome do arquivo (`dica_arquivo`): se você
+mandar a planilha de defesas com `--tarefa faturamento-final`, a rodada é
+abortada antes de começar. Quando o par estiver certo mas o arquivo não seguir
+a convenção de nome, `--forcar-planilha` passa por cima. Tarefa avulsa e os
+modos auto e planilha não têm essa trava — nos dois últimos a garantia vem da
+própria célula de cada linha.
+
+Tipo e responsável de um perfil podem ser quaisquer que existam no Legal One —
+o tipo pelo caminho na árvore (`"Diversos / Contato Telefônico"`), o responsável
+pelo nome de um usuário ativo. Eles são conferidos contra o próprio Legal One
+**antes do primeiro cadastro** (`src/catalogo.py`): o que não casa com
+exatamente uma opção para a rodada com código 2 e a lista do que existe, em vez
+de virar erro em cada processo — ou, pior, de cair num tipo parecido. A árvore
+tem nomes repetidos sob pais diferentes ("Audiência" aparece em mais de dez
+lugares) e nomes que já contêm barra ("Agravo em REsp / Rext"), por isso o
+casamento é sempre pelo caminho inteiro. Detalhes no
+[Manual](MANUAL.md#perfis-de-tarefa).
 
 ### `--tarefa auto`
 
@@ -184,20 +219,36 @@ seguidos o programa para, descarta esses registros suspeitos do ledger e avisa.
 sucesso. O descarte só alcança registros pendentes: `ok`, `recadastrada` e
 `ja_existia` são trabalho confirmado no Legal One e nunca são apagados.
 
-**Recusa silenciosa no Salvar** — o caso que *nenhuma* trava alcança, e por
-isso o mais caro. O Legal One pode recusar o cadastro por validação (data de
-início anterior ao dia corrente, responsável que já consta como envolvido) sem
-mostrar erro: ele apenas sai do formulário de criação. Como o sucesso é
-reconhecido justamente por sair de `CreateFromProcesso`, a recusa é lida como
-cadastro feito, o processo entra no ledger como `ok` e o relatório o lista. A
-tarefa nunca existiu.
+**Formulário devolvido no Salvar** — até a 1.7 era o caso que *nenhuma* trava
+alcançava. Quando o Legal One não grava, ele devolve o formulário em
+`/processos/tarefas/Edit`, com uma de três coisas na tela: um **erro de
+validação** (status Pendente com data passada; responsável que já consta como
+envolvido — `O conteúdo informado no campo 'Nome' já existe`), um **aviso** que
+pede confirmação (data anterior a hoje: *Deseja salvar mesmo assim?*), ou nada
+legível. O programa reconhecia sucesso por ter saído de `CreateFromProcesso`, e
+`/Edit` já satisfazia isso: o processo entrava no ledger como `ok` e a tarefa
+nunca existia. Medido em 09-10/09/2026 na `Faturamento 2024.xlsx`: de 3.003
+cadastros dados como feitos, **208 não existiam** (6,9%).
 
-Medido em 09-10/09/2026 na `Faturamento 2024.xlsx`: de 3.003 cadastros dados
-como feitos, **208 não existiam** (6,9%) — conferidos um a um no Legal One. Não
-é erro, não é sessão expirada, não é "não encontrado": o log mostra `cadastrada`
-no ritmo normal e o placar não acusa nada. Enquanto o salvamento não for
-confirmado pela grade (ou pela ausência de `.validation-summary-errors`) em vez
-da URL, **toda rodada precisa ser auditada depois** — ver
+Desde a 1.8 o sucesso é sair do formulário **para outra página** — o cadastro
+aceito vai para `/processos/compromissotarefa`, que mostra "erro inesperado no
+servidor" mas com a tarefa gravada. No formulário devolvido:
+
+- erro de validação vira `erro`, com a mensagem do Legal One no `DETALHE`;
+- o aviso de data passada só é confirmado quando o **dia** foi pedido (`--data`,
+  `--fim` ou a coluna da planilha). Sem dia pedido, ele só aparece num processo
+  pego pela meia-noite, e aí vira `erro` para ser refeito com a data do dia, em
+  vez de gravar a tarefa com a de ontem;
+- formulário devolvido sem mensagem legível vira `erro` — nunca `ok`.
+
+As regras foram levantadas em 29/09/2026 na pasta de teste (`Proc - 0108067`):
+Cumprido com data passada grava depois de confirmar; Pendente com conclusão no
+passado é recusado; início depois da conclusão é recusado; hora já passada no
+próprio dia é aceita sem aviso (só a data conta). As duas recusas são
+conferidas em cada processo **antes de abrir o Chrome** (`src/datas.py`), e a
+rodada nem começa — senão cada processo viraria o mesmo `erro` até o disjuntor.
+
+A auditoria das rodadas feitas até a 1.7 continua valendo — ver
 [Manual](MANUAL.md#o-ledger-diz-cadastrado-mas-a-tarefa-não-existe).
 
 **`Ctrl+C`** — encerra limpo, exporta os relatórios e mantém o progresso.
@@ -219,7 +270,10 @@ Excel):
 
 **`data/relatorio.csv`** — uma linha por processo já processado: número,
 situação, id no Legal One, detalhe, tipo de cobrança, status na planilha,
-origem e quando rodou.
+origem e quando rodou. No fim vêm os valores da tarefa enviada ao Legal One
+(`TIPO_TAREFA`, `STATUS_TAREFA`, `RESPONSAVEL`, `DATA_INICIO`, `DATA_FIM`,
+`DATA_PUBLICACAO`, `DATA_DISPONIBILIZACAO`; as datas com a hora, quando pedida) —
+depois das colunas antigas, para não deslocar quem lê o arquivo pela posição.
 
 **`data/nao_encontrados.csv`** — só o que precisa de conferência manual
 (`nao_encontrado` e `ambiguo`), ordenado pela posição na planilha. Sai do ledger,
@@ -230,7 +284,7 @@ então é **acumulado**: traz o que todas as rodadas já levantaram, e não só 
 | --- | --- |
 | `PROCESSO` | O número como está na planilha |
 | `PESQUISADO_COMO` | Só preenchido quando o número foi corrigido antes de buscar |
-| `TAREFA` | Qual das duas tarefas essa rodada tentava cadastrar |
+| `TAREFA` | A descrição da tarefa que essa rodada tentava cadastrar |
 | `SITUACAO` | `nao_encontrado` ou `ambiguo` |
 | `MOTIVO` | Por que falhou (sem resultado, só recurso, número fora do padrão…) |
 | `TIPO_COBRANCA` | Ajuda a priorizar o que conferir |
@@ -248,18 +302,33 @@ automaticamente ao fim de toda rodada real que tenha cadastrado alguma coisa.
 Traz só os processos que *esta instalação cadastrou naquele dia*, com cabeçalho
 formatado, painel congelado e autofiltro. Colunas: processo, id no Legal One, os
 quatro valores da tarefa (descrição, status, tipo, responsável), tipo de
-cobrança, status na planilha, origem, o horário do cadastro e
-`JÁ TINHA A TAREFA` (`Sim` nos recadastros, vazio nos demais).
+cobrança, status na planilha, origem, o horário do cadastro,
+`JÁ TINHA A TAREFA` (`Sim` nos recadastros, vazio nos demais) e as datas de
+`INÍCIO`, `CONCLUSÃO`, `PUBLICAÇÃO` e `DISPONIBILIZAÇÃO` da tarefa.
+
+Status, tipo, responsável e datas saem do **ledger**, que guarda o que foi de
+fato enviado ao formulário — e não do perfil. Antes da versão 1.8 o ledger
+guardava só a descrição e a planilha reconstruía o resto pelo perfil; com
+tarefas que podem variar de uma rodada para outra, isso descreveria a tarefa
+de hoje, e não a que foi cadastrada. Os registros anteriores à 1.8 recebem
+Diversos / Cumprido / Heloiza na migração (eram os valores fixos de então), e
+ficam com as datas em branco: a rodada não as guardava, e deduzi-las do horário
+do cadastro erraria justamente nos cadastros feitos depois da meia-noite.
 
 Uma rodada que atravessa a meia-noite gera **as duas** planilhas, cada uma só com
-o que foi cadastrado naquele dia. Se as duas tarefas rodarem no mesmo dia, as
-duas aparecem no mesmo arquivo, separadas pela coluna `TAREFA`. Sem `--data`, a
+o que foi cadastrado naquele dia. Tarefas diferentes cadastradas no mesmo dia
+aparecem no mesmo arquivo, separadas pela coluna `TAREFA`. Sem `--data`, a
 data gravada na tarefa também é recalculada a cada cadastro: tarefas antes da
 virada recebem a data de ontem e as de depois, a de hoje. Use `--data` para
 fixar a mesma data na rodada inteira.
 
-Os valores fixos da tarefa são repetidos em toda linha de propósito: assim a
+Os valores da tarefa são repetidos em toda linha de propósito: assim a
 planilha se explica sozinha para quem recebe e não acompanhou a execução.
+
+As levas entregues à supervisão nem sempre coincidem com um dia — uma leva
+atravessa a meia-noite, um dia tem duas. Para esses recortes há o
+`scripts/planilha_da_leva.py`, que gera a mesma planilha para qualquer janela de
+horário ([manual](MANUAL.md#scripts-de-operação)).
 
 Qualquer um desses arquivos pode ser refeito depois com `--relatorio`
 ([manual](MANUAL.md#relatórios)).
@@ -291,16 +360,35 @@ em vez de sumirem em silêncio.
 
 ```
 src/
-├── main.py       # CLI, laço principal (classe Rodada), progresso e ETA
-├── config.py     # URLs, seletores, valores da tarefa e timeouts
+├── main.py       # CLI, preparação e laço principal (classe Rodada), progresso e ETA
+├── config.py     # URLs, colunas, leitura do tarefas.toml e timeouts
+├── catalogo.py   # casa tipo e responsável pedidos com o Legal One
+├── datas.py      # datas e horas da tarefa e o que o Legal One recusa
 ├── planilha.py   # leitura do .xlsx -> lista de processos únicos
 ├── legalone.py   # Selenium: busca o processo e cadastra a tarefa
 ├── ledger.py     # checkpoint em SQLite + exportação dos CSVs
 └── relatorio.py  # planilha Excel do dia (a que vai para o supervisor)
 
+scripts/          # ferramentas de operação: auditoria, planilha por leva, rodada até a meta
+tarefas.toml      # perfis de tarefa (--tarefa)
 tests/            # pytest — nenhum teste abre o Chrome
 .github/          # CI, análise de dependências e Dependabot
 ```
+
+Fora do Git, só nesta máquina (contêm números de processo e nomes de clientes):
+
+```
+data/             # o estado da automação: ledger, relatorio.csv, listas de conferência,
+│                 # planilhas do dia — tudo o que o programa lê e escreve sozinho
+└── backups/      # cópias do ledger feitas antes de mexer nele à mão
+logs/             # faturamento.log e os logs de cada rodada longa
+Planilhas/        # as planilhas de cobrança recebidas (a entrada das rodadas)
+Cadastros/        # o que foi entregue à supervisão: planilhas por leva, auditorias
+```
+
+`data/` e `logs/` são criadas sozinhas; `Planilhas/` e `Cadastros/` são convenção
+de organização, e o programa não depende delas — `--planilha` aceita qualquer
+caminho.
 
 ## Desenvolvimento
 
@@ -313,9 +401,13 @@ ruff check .    # lint
 Nenhum teste toca no Legal One, no Chrome ou no ledger de produção: o Selenium
 é substituído por um automador falso e todo arquivo vai para um diretório
 temporário. O que está coberto é justamente o que dói quando quebra — a
-interpretação da grade de resultados (em qual pasta a tarefa vai), o ledger
+interpretação da grade de resultados (em qual pasta a tarefa vai), a leitura da
+página depois do Salvar (o que conta como gravado), o casamento de tipo e
+responsável, as regras de data do Legal One, o `tarefas.toml`, o ledger
 (inclusive as migrações de esquema antigo) e as regras que param ou não param a
 fila: disjuntor, `--max-cadastros`, sessão expirada, `Ctrl+C` e erro isolado.
+Os scripts de `scripts/` não têm teste próprio: são finos, e a consulta ao
+ledger que eles usam (`cadastrados_entre`) é testada.
 
 `ruff format` **não** é usado: o código é alinhado à mão e reformatar tudo
 esconderia o histórico atrás de uma mudança de estilo.
@@ -352,10 +444,23 @@ Ele já vem sem gatilho de push justamente para não atrapalhar o dia a dia.
   `StatusText` mas deixa `StatusId` **vazio**; é o clique na linha do lookup que
   grava `StatusId=1`. E o casamento precisa ser exato, porque `Não cumprido`
   contém `Cumprido` como substring.
-- **Tipo e datas já vêm certos do formulário** (`Diversos` / hoje). O código
-  confere o tipo em vez de reescrever, para não desfazer o vínculo de `TipoId`.
-  Se o padrão do Legal One mudar, o programa falha alto em vez de cadastrar
-  errado.
+- **Tipo só é vinculado com clique, na árvore.** Como no status, digitar o
+  texto não grava `TipoId`. O lookup de tipo é uma árvore (tipos com subtipos
+  escondidos até o pai ser expandido), e cada linha tem o id do tipo
+  (`tr#tipo_4`, `tr#subtipo_9`). Quando o tipo pedido já é o que o formulário
+  traz (`Diversos`), ele não é reescolhido.
+- **O tipo é escolhido antes das datas.** Subtipo com contagem de prazo preenche
+  sozinho a Data de publicação e o Prazo e recalcula início e fim; as datas
+  pedidas são escritas depois e conferidas de novo logo antes do Salvar.
+- **As listas de tipos e usuários vêm dos próprios endpoints dos lookups**
+  (`LookupTreeTiposTarefa`, `LookupGridUsuario`), por `fetch` dentro da aba,
+  com a sessão do Chrome. A aba precisa estar no `hasson.novajus.com.br`: a raiz
+  dele redireciona para `firm.legalone.com.br`, e um `fetch` relativo dali pedia
+  a lista ao host errado.
+- **Cadastro gravado é o que sai do formulário para outra página.** O Legal One
+  devolve o formulário em `/processos/tarefas/Edit` quando recusa ou pede
+  confirmação, e isso já tinha sido lido como sucesso (ver
+  [Como os erros são tratados](#como-os-erros-são-tratados)).
 - **Só cadastra em pasta do tipo `Processo`.** Recurso e incidente repetem o
   número CNJ do processo principal; cadastrar neles duplicaria a tarefa.
   Verificado em produção: o CNJ `0003850-54.2026.8.16.0188` tem 3 pastas
@@ -393,7 +498,20 @@ Para os ~12 mil processos únicos da planilha, o fluxo completo fica na casa das
 
 ## Versão
 
-**1.7.0** — correções das rodadas de 13 a 16/09/2026. O aviso in-app do Legal
+**1.8.0** — a automação deixa de ser só de faturamento e defesa: qualquer tarefa,
+com qualquer tipo, status, responsável e data. Os perfis saem do código para o
+`tarefas.toml`; `--descricao`, `--tipo`, `--status` e `--responsavel` definem
+ou sobrepõem a tarefa na linha de comando, e `--tarefa planilha` a lê das
+colunas `... DA TAREFA` de cada linha. Tipo e responsável são conferidos no
+Legal One antes do primeiro cadastro (`catalogo.py`). Datas: `--data`/`--inicio`
+com hora, `--fim`, `--publicacao` e `--disponibilizacao`, com as regras do
+Legal One conferidas antes de abrir o Chrome (`datas.py`). O Salvar passa a ser
+confirmado fora do formulário devolvido: o "cadastro fantasma" (6,9% em
+09-10/09) era o aviso de data passada e as recusas de validação lidos como
+sucesso. O ledger guarda a tarefa enviada (tipo, status, responsável e datas) e
+os relatórios leem de lá. Os scripts de operação ganham a pasta `scripts/`.
+
+1.7.0 — correções das rodadas de 13 a 16/09/2026. O aviso in-app do Legal
 One (Pendo) é dispensado antes do Salvar, e um clique interceptado ganha uma
 segunda tentativa. A descrição é redigitada quando o formulário a apaga ao
 terminar de carregar (87 erros nessas rodadas). O Salvar que não confirma vira

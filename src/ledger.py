@@ -14,7 +14,7 @@ import logging
 import sqlite3
 from collections import Counter
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,13 @@ CREATE TABLE IF NOT EXISTS processos (
     status_planilha TEXT,
     cnj_original    TEXT,
     quando          TEXT NOT NULL,
+    tipo            TEXT,
+    status          TEXT,
+    responsavel     TEXT,
+    data_inicio     TEXT,
+    data_fim        TEXT,
+    data_publicacao TEXT,
+    data_disponibilizacao TEXT,
     PRIMARY KEY (cnj, tarefa)
 )
 """
@@ -76,12 +83,45 @@ ESQUEMA_INDICES = (
     "CREATE INDEX IF NOT EXISTS idx_tarefa ON processos(tarefa)",
 )
 
-# Colunas acrescentadas depois que ja havia ledger em producao. Sao opcionais,
-# entao entram com ALTER TABLE em vez de recriar a tabela.
-COLUNAS_NOVAS = [("cnj_original", "TEXT")]
-
 # Antes de existirem duas tarefas, o ledger so guardava FATURAMENTO FINAL.
 TAREFA_HISTORICA = "FATURAMENTO FINAL"
+
+# Valores de toda tarefa gravada antes de o ledger guardar tipo, status e
+# responsavel: ate a versao 1.7 so existiam FATURAMENTO FINAL e DEFESA FATURADA,
+# ambas Diversos / Cumprido / Heloiza. Sem preencher o historico, a planilha de
+# um dia antigo refeita com --relatorio sairia com essas colunas em branco.
+# A data nao entra: a rodada nao a guardava, e chutar pela coluna `quando`
+# erraria justamente nos cadastros de depois da meia-noite.
+#
+# O preenchimento vale para NULL, e so NULL: e o que sobra numa linha gravada
+# por codigo anterior a 1.8, que nao conhece essas colunas. A 1.8 grava '' quando
+# nao sabe um valor. Por isso ele roda a cada abertura, e nao so quando a coluna
+# nasce — uma maquina ainda na 1.7 continua gravando no ledger ja migrado.
+VALORES_HISTORICOS = {
+    "tipo": "Diversos",
+    "status": "Cumprido",
+    "responsavel": "Heloiza Helena de Araujo",
+}
+
+# Colunas acrescentadas depois que ja havia ledger em producao. Sao opcionais,
+# entao entram com ALTER TABLE em vez de recriar a tabela; as que tem valor
+# historico ja entram preenchidas nos registros que existiam.
+COLUNAS_NOVAS = [
+    ("cnj_original", "TEXT"),
+    ("tipo", "TEXT"),
+    ("status", "TEXT"),
+    ("responsavel", "TEXT"),
+    ("data_inicio", "TEXT"),
+    ("data_fim", "TEXT"),
+    ("data_publicacao", "TEXT"),
+    ("data_disponibilizacao", "TEXT"),
+]
+
+# Campos que descrevem a tarefa enviada ao Legal One. Seguem a trava de
+# rebaixamento, como situacao e detalhe: uma passada posterior que falhou nao
+# pode reescrever a data ou o status de uma tarefa que nos ja criamos.
+CAMPOS_DA_TAREFA = ("tipo", "status", "responsavel", "data_inicio", "data_fim",
+                    "data_publicacao", "data_disponibilizacao")
 
 
 class Ledger:
@@ -99,6 +139,9 @@ class Ledger:
         self.con.execute(ESQUEMA_TABELA)
         for indice in ESQUEMA_INDICES:
             self.con.execute(indice)
+        if self._preencher_historico():
+            logger.info("Ledger: valores historicos dados a registros gravados "
+                        "por versao anterior a 1.8")
         self.con.commit()
 
     def _migrar(self) -> None:
@@ -132,10 +175,13 @@ class Ledger:
             self.con.execute(
                 f"INSERT INTO processos "
                 f"  (cnj, tarefa, situacao, id_legalone, detalhe, origem, "
-                f"   tipo_cobranca, status_planilha, quando) "
+                f"   tipo_cobranca, status_planilha, quando, "
+                f"   tipo, status, responsavel) "
                 f"SELECT cnj, ?, situacao, id_legalone, detalhe, origem, "
-                f"       {tipo}, {status}, quando FROM processos_antigo",
-                (TAREFA_HISTORICA,),
+                f"       {tipo}, {status}, quando, ?, ?, ? "
+                f"FROM processos_antigo",
+                (TAREFA_HISTORICA, VALORES_HISTORICOS["tipo"],
+                 VALORES_HISTORICOS["status"], VALORES_HISTORICOS["responsavel"]),
             )
             movidos = self.con.execute("SELECT COUNT(*) FROM processos").fetchone()[0]
             self.con.execute("DROP TABLE processos_antigo")
@@ -147,14 +193,42 @@ class Ledger:
                     movidos, TAREFA_HISTORICA)
 
     def _acrescentar_colunas(self, colunas: list[str]) -> None:
-        """Poe no lugar colunas opcionais que o ledger ainda nao tenha."""
-        for nome, tipo in COLUNAS_NOVAS:
-            if nome not in colunas:
-                self.con.execute(
-                    f"ALTER TABLE processos ADD COLUMN {nome} {tipo}"
-                )
-                logger.info("Ledger: coluna %r acrescentada", nome)
+        """Poe no lugar colunas opcionais que o ledger ainda nao tenha.
+
+        O preenchimento do historico acontece so no momento em que a coluna
+        nasce, e na mesma transacao: depois disso, um valor vazio e um registro
+        novo que de fato nao tinha o dado, e nao pode ser reescrito.
+
+        A transacao e explicita porque o sqlite3 do Python roda o ALTER TABLE
+        em autocommit: uma queda entre ele e o UPDATE deixaria a coluna criada
+        e vazia, e a proxima abertura ja nao a veria como nova.
+        """
+        faltando = [(n, t) for n, t in COLUNAS_NOVAS if n not in colunas]
+        if not faltando:
+            return
+        self.con.execute("BEGIN IMMEDIATE")
+        try:
+            for nome, tipo in faltando:
+                self.con.execute(f"ALTER TABLE processos ADD COLUMN {nome} {tipo}")
+            self._preencher_historico()
+        except Exception:
+            self.con.rollback()
+            raise
         self.con.commit()
+        for nome, _ in faltando:
+            logger.info("Ledger: coluna %r acrescentada", nome)
+
+    def _preencher_historico(self) -> int:
+        """Da os valores historicos as linhas gravadas por codigo pre-1.8.
+
+        Nao faz commit: quem chama decide a transacao. Ver VALORES_HISTORICOS.
+        """
+        preenchidas = 0
+        for nome, valor in VALORES_HISTORICOS.items():
+            preenchidas += self.con.execute(
+                f"UPDATE processos SET {nome} = ? WHERE {nome} IS NULL", (valor,)
+            ).rowcount
+        return preenchidas
 
     def registrar(
         self,
@@ -167,6 +241,13 @@ class Ledger:
         tipo_cobranca: str = "",
         status_planilha: str = "",
         cnj_original: str = "",
+        tipo: str = "",
+        status: str = "",
+        responsavel: str = "",
+        data_inicio: str = "",
+        data_fim: str = "",
+        data_publicacao: str = "",
+        data_disponibilizacao: str = "",
     ) -> None:
         # Duas protecoes na reescrita de um registro que ja existe:
         #
@@ -181,11 +262,21 @@ class Ledger:
         #    cadastro nao sabe o tipo de cobranca, por exemplo). Valor vazio
         #    nunca sobrescreve valor preenchido, senao a segunda passada
         #    esvaziaria as colunas que a primeira tinha preenchido.
+        #
+        # Os campos da tarefa (CAMPOS_DA_TAREFA) seguem as duas regras juntas:
+        # travados num cadastro nosso, e sem aceitar vazio por cima de valor.
+        campos_da_tarefa = "".join(
+            f", {c} = CASE WHEN {_SQL_NAO_REBAIXAR} THEN processos.{c} "
+            f"ELSE COALESCE(NULLIF(excluded.{c}, ''), processos.{c}) END"
+            for c in CAMPOS_DA_TAREFA
+        )
         self.con.execute(
             "INSERT INTO processos "
             "  (cnj, tarefa, situacao, id_legalone, detalhe, origem, "
-            "   tipo_cobranca, status_planilha, cnj_original, quando) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "   tipo_cobranca, status_planilha, cnj_original, quando, "
+            "   tipo, status, responsavel, data_inicio, data_fim, "
+            "   data_publicacao, data_disponibilizacao) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(cnj, tarefa) DO UPDATE SET "
             f"  situacao = CASE WHEN {_SQL_NAO_REBAIXAR} "
             "                  THEN processos.situacao ELSE excluded.situacao END, "
@@ -202,10 +293,13 @@ class Ledger:
             "  status_planilha = COALESCE(NULLIF(excluded.status_planilha, ''), "
             "                             processos.status_planilha), "
             "  cnj_original    = COALESCE(NULLIF(excluded.cnj_original, ''), "
-            "                             processos.cnj_original)",
+            "                             processos.cnj_original)"
+            + campos_da_tarefa,
             (cnj, tarefa, situacao, id_legalone, detalhe, origem, tipo_cobranca,
              status_planilha, cnj_original,
-             datetime.now().isoformat(timespec="seconds")),
+             datetime.now().isoformat(timespec="seconds"),
+             tipo, status, responsavel, data_inicio, data_fim,
+             data_publicacao, data_disponibilizacao),
         )
         self.con.commit()
 
@@ -268,14 +362,29 @@ class Ledger:
 
         Inclui os recadastros: eles tambem criaram tarefa naquele dia, e a
         planilha do supervisor precisa mostra-los — marcados como tal.
+
+        Os campos da tarefa (tipo, status, responsavel, datas) vem no fim, na
+        ordem de CAMPOS_DA_TAREFA.
+        """
+        seguinte = (date.fromisoformat(dia) + timedelta(days=1)).isoformat()
+        return self.cadastrados_entre(dia, seguinte)
+
+    def cadastrados_entre(self, desde: str, ate: str) -> list[tuple]:
+        """Cadastros feitos por nos com `quando` em [desde, ate).
+
+        desde/ate no formato do ledger, com a precisao que se quiser
+        ("2026-09-10" ou "2026-09-10T14:00"). E o recorte de uma leva: as levas
+        nao coincidem com dias — uma atravessa a meia-noite, um dia tem duas.
+        Mesmas colunas de cadastrados_em.
         """
         marcas = ",".join("?" * len(NOSSOS_CADASTROS))
         return self.con.execute(
             f"SELECT cnj, tarefa, id_legalone, tipo_cobranca, status_planilha, "
-            f"       origem, quando, situacao "
-            f"FROM processos WHERE situacao IN ({marcas}) AND quando LIKE ? "
+            f"       origem, quando, situacao, {', '.join(CAMPOS_DA_TAREFA)} "
+            f"FROM processos WHERE situacao IN ({marcas}) "
+            f"  AND quando >= ? AND quando < ? "
             f"ORDER BY tarefa, quando",
-            (*NOSSOS_CADASTROS, f"{dia}%"),
+            (*NOSSOS_CADASTROS, desde, ate),
         ).fetchall()
 
     def dias_com_cadastro(self) -> list[str]:
@@ -300,16 +409,20 @@ class Ledger:
         )))
 
     def exportar_csv(self, caminho: str | Path) -> int:
+        # Os campos da tarefa entram no fim: quem ja le este CSV pela posicao
+        # das colunas continua achando as antigas no mesmo lugar.
         linhas = self.con.execute(
-            "SELECT cnj, tarefa, situacao, id_legalone, detalhe, tipo_cobranca, "
-            "       status_planilha, origem, quando "
-            "FROM processos ORDER BY tarefa, situacao, cnj"
+            f"SELECT cnj, tarefa, situacao, id_legalone, detalhe, tipo_cobranca, "
+            f"       status_planilha, origem, quando, {', '.join(CAMPOS_DA_TAREFA)} "
+            f"FROM processos ORDER BY tarefa, situacao, cnj"
         ).fetchall()
         with open(caminho, "w", newline="", encoding="utf-8-sig") as f:
             escritor = csv.writer(f, delimiter=";")
             escritor.writerow(
                 ["PROCESSO", "TAREFA", "SITUACAO", "ID_LEGALONE", "DETALHE",
-                 "TIPO_COBRANCA", "STATUS_PLANILHA", "ORIGEM", "QUANDO"]
+                 "TIPO_COBRANCA", "STATUS_PLANILHA", "ORIGEM", "QUANDO",
+                 "TIPO_TAREFA", "STATUS_TAREFA", "RESPONSAVEL", "DATA_INICIO",
+                 "DATA_FIM", "DATA_PUBLICACAO", "DATA_DISPONIBILIZACAO"]
             )
             escritor.writerows(linhas)
         logger.info("Relatorio salvo: %s (%d linha[s])", caminho, len(linhas))

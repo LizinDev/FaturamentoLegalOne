@@ -10,7 +10,6 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-import config
 import ledger
 
 logger = logging.getLogger(__name__)
@@ -29,6 +28,12 @@ CABECALHO = [
     # A tarefa ja estava no processo e foi cadastrada de novo. Coluna propria, e
     # nao uma nota no fim: e por ela que o supervisor filtra o excesso no Excel.
     ("JÁ TINHA A TAREFA", 18),
+    # As datas entraram depois, no fim, para nao deslocar as colunas que quem
+    # recebe a planilha ja conhece.
+    ("INÍCIO", 18),
+    ("CONCLUSÃO", 18),
+    ("PUBLICAÇÃO", 14),
+    ("DISPONIBILIZAÇÃO", 18),
 ]
 
 _PREENCHIMENTO = PatternFill("solid", fgColor="1F3864")
@@ -59,24 +64,27 @@ def gerar_planilha_do_dia(caminho: str | Path, dia: str, linhas: list[tuple]) ->
         ws.column_dimensions[get_column_letter(coluna)].width = largura
 
     for i, linha in enumerate(linhas, 2):
-        cnj, tarefa, id_lo, tipo_cob, status_pl, origem, quando, situacao = linha
-        # O ledger guarda so a descricao; o perfil devolve status, tipo e
-        # responsavel. Um mesmo dia pode ter as duas tarefas.
-        perfil = config.PERFIS_POR_DESCRICAO.get(tarefa)
+        (cnj, tarefa, id_lo, tipo_cob, status_pl, origem, quando, situacao,
+         tipo, status, responsavel, inicio, fim, publicacao, disponibilizacao) = linha
         ws.cell(row=i, column=1, value=cnj)
         ws.cell(row=i, column=2, value=int(id_lo) if str(id_lo).isdigit() else id_lo)
-        # Os valores da tarefa sao fixos por perfil; repeti-los em cada linha
-        # deixa a planilha autoexplicativa para quem recebe e nao acompanhou.
+        # Os valores vem do ledger, e nao do perfil: sao os que foram enviados
+        # ao Legal One. Repeti-los em cada linha deixa a planilha
+        # autoexplicativa para quem recebe e nao acompanhou a rodada.
         ws.cell(row=i, column=3, value=tarefa)
-        ws.cell(row=i, column=4, value=perfil.status if perfil else "")
-        ws.cell(row=i, column=5, value=perfil.tipo if perfil else "")
-        ws.cell(row=i, column=6, value=perfil.responsavel_esperado if perfil else "")
+        ws.cell(row=i, column=4, value=status or "")
+        ws.cell(row=i, column=5, value=tipo or "")
+        ws.cell(row=i, column=6, value=responsavel or "")
         ws.cell(row=i, column=7, value=tipo_cob or "")
         ws.cell(row=i, column=8, value=status_pl or "")
         ws.cell(row=i, column=9, value=origem or "")
         ws.cell(row=i, column=10, value=_formatar_horario(quando))
         ws.cell(row=i, column=11,
                 value="Sim" if situacao == ledger.RECADASTRADA else "")
+        ws.cell(row=i, column=12, value=inicio or "")
+        ws.cell(row=i, column=13, value=fim or "")
+        ws.cell(row=i, column=14, value=publicacao or "")
+        ws.cell(row=i, column=15, value=disponibilizacao or "")
 
     ws.freeze_panes = "A2"
     if linhas:
