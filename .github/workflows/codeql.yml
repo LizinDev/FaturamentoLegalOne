@@ -24,7 +24,7 @@ jobs:
       security-events: write   # necessario para publicar os alertas
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: github/codeql-action/init@v3
         with:
