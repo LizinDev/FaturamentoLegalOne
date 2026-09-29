@@ -519,7 +519,9 @@ class AutomadorLegalOne:
         porque passa por cadastro certo.
         """
         pedidas = {"DtInicial": tarefa.data_inicio, "DtFinal": tarefa.data_fim,
-                   "HrInicio": tarefa.hora_inicio, "HrFinal": tarefa.hora_fim}
+                   "HrInicio": tarefa.hora_inicio, "HrFinal": tarefa.hora_fim,
+                   "DtPublicacao": tarefa.data_publicacao,
+                   "AvailableDate": tarefa.data_disponibilizacao}
         for campo, valor in pedidas.items():
             if valor is None:
                 continue
@@ -751,6 +753,14 @@ class AutomadorLegalOne:
         # O tipo vem antes das datas: um subtipo com contagem de prazo recalcula
         # inicio e fim, e as datas pedidas tem que ser escritas por cima disso.
         self._selecionar_tipo(tarefa)
+        # Publicacao e disponibilizacao tambem: o subtipo as preenche com hoje,
+        # e a publicacao, com prazo, pode recalcular inicio e fim de novo.
+        if tarefa.data_publicacao:
+            self._preencher_data("DtPublicacao", tarefa.data_publicacao)
+        if tarefa.data_disponibilizacao:
+            self._preencher_data("AvailableDate", tarefa.data_disponibilizacao)
+        if tarefa.data_publicacao or tarefa.data_disponibilizacao:
+            self._esperar_ajax()
 
         self._preencher_data("DtInicial", tarefa.data_inicio)
         self._preencher_data("DtFinal", tarefa.data_fim)

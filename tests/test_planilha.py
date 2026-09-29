@@ -345,12 +345,14 @@ def test_colunas_da_tarefa_sao_lidas_por_linha(tmp_path):
 
     assert [(p.cnj, p.tarefa) for p in processos] == [
         (A, "CONFERIR CUSTAS"), (B, "CONFERIR CUSTAS")]
+    sem_datas = {"inicio": "", "fim": "", "publicacao": "", "disponibilizacao": ""}
     assert processos[0].campos_tarefa == {
         "tipo": "Diversos", "status": "Pendente",
-        "responsavel": "Pedro Henrique Braz Moreira"}
+        "responsavel": "Pedro Henrique Braz Moreira", **sem_datas}
     # Celula vazia fica vazia: quem completa e a preparacao da rodada.
     assert processos[1].campos_tarefa == {
-        "tipo": "", "status": "", "responsavel": "Nathalia Maria Gatto Pinto"}
+        "tipo": "", "status": "", "responsavel": "Nathalia Maria Gatto Pinto",
+        **sem_datas}
     # Quem le a planilha nao decide o perfil.
     assert processos[0].perfil is None
 
@@ -424,3 +426,27 @@ def test_colunas_da_tarefa_sao_ignoradas_fora_do_modo(tmp_path):
     processos = planilha.ler(arq)
 
     assert processos[0].tarefa == "" and processos[0].campos_tarefa == {}
+
+
+def test_colunas_de_data_aceitam_celula_de_data_e_texto(tmp_path):
+    import datetime
+
+    arq = _planilha(tmp_path, {"Tarefas": [
+        (*CABECALHO_TAREFA, "INÍCIO DA TAREFA", "CONCLUSÃO DA TAREFA",
+         "PUBLICAÇÃO DA TAREFA", "DISPONIBILIZAÇÃO DA TAREFA"),
+        # Celulas de data/hora do Excel.
+        (A, "CONFERIR CUSTAS", None, "Pendente", "Pedro Henrique Braz Moreira",
+         datetime.datetime(2026, 10, 1, 9, 0), datetime.datetime(2026, 10, 1),
+         datetime.date(2026, 9, 25), None),
+        # Texto digitado passa como esta; quem interpreta e o datas.py.
+        (B, "CONFERIR CUSTAS", None, "Pendente", "Pedro Henrique Braz Moreira",
+         "01/10/2026  14:00", None, None, "24/09/2026"),
+    ]})
+
+    a, b = planilha.ler(arq, colunas_da_tarefa=True)
+
+    assert (a.campos_tarefa["inicio"], a.campos_tarefa["fim"],
+            a.campos_tarefa["publicacao"]) == ("01/10/2026 09:00:00", "01/10/2026",
+                                               "25/09/2026")
+    assert (b.campos_tarefa["inicio"], b.campos_tarefa["disponibilizacao"]) == (
+        "01/10/2026 14:00", "24/09/2026")

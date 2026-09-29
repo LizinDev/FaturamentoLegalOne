@@ -7,6 +7,8 @@ import sys
 import unicodedata
 from pathlib import Path
 
+import datas
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10: o tomllib so entrou na 3.11
@@ -125,20 +127,34 @@ class Tarefa:
     # Id na arvore de tipos ("tipo_4", "subtipo_9"). Vazio quando o tipo nao
     # passou pela checagem: ai o formulario so confere o tipo que ja vem nele.
     tipo_id: str = ""
+    # None deixa o que o formulario poe: vazio, ou o que o subtipo com contagem
+    # de prazo sugerir (a data de hoje).
+    data_publicacao: str | None = None
+    data_disponibilizacao: str | None = None
 
     @classmethod
-    def do_perfil(cls, perfil: PerfilTarefa, data: str,
+    def do_perfil(cls, perfil: PerfilTarefa, quando: "str | datas.Datas",
                   confirmar_data_passada: bool = False) -> "Tarefa":
-        """A tarefa de um perfil numa data, com inicio e fim no mesmo dia."""
+        """A tarefa de um perfil com as datas de um cadastro.
+
+        `quando` e uma data so (inicio e fim no mesmo dia, hora do formulario)
+        ou as Datas completas que a Agenda resolveu.
+        """
+        if isinstance(quando, str):
+            quando = datas.Datas(quando, None, quando, None)
         return cls(
             descricao=perfil.descricao,
             tipo=perfil.tipo,
             status=perfil.status,
             responsavel=perfil.responsavel,
-            data_inicio=data,
-            data_fim=data,
+            data_inicio=quando.inicio,
+            data_fim=quando.fim,
+            hora_inicio=quando.hora_inicio,
+            hora_fim=quando.hora_fim,
             confirmar_data_passada=confirmar_data_passada,
             tipo_id=perfil.tipo_id,
+            data_publicacao=quando.publicacao,
+            data_disponibilizacao=quando.disponibilizacao,
         )
 
     @property
@@ -333,6 +349,13 @@ COLUNA_DESCRICAO_TAREFA = "DESCRIÇÃO DA TAREFA"
 COLUNA_TIPO_TAREFA = "TIPO DA TAREFA"
 COLUNA_STATUS_TAREFA = "STATUS DA TAREFA"
 COLUNA_RESPONSAVEL_TAREFA = "RESPONSÁVEL DA TAREFA"
+# Datas no mesmo modo. Inicio e conclusao aceitam hora na mesma celula
+# ("29/09/2026 09:00") ou celula de data/hora do Excel; publicacao e
+# disponibilizacao sao so data, como no formulario.
+COLUNA_INICIO_TAREFA = "INÍCIO DA TAREFA"
+COLUNA_CONCLUSAO_TAREFA = "CONCLUSÃO DA TAREFA"
+COLUNA_PUBLICACAO_TAREFA = "PUBLICAÇÃO DA TAREFA"
+COLUNA_DISPONIBILIZACAO_TAREFA = "DISPONIBILIZAÇÃO DA TAREFA"
 
 # --- Execucao ----------------------------------------------------------------
 

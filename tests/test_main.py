@@ -8,6 +8,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 import config
+import datas
 import ledger as ledger_mod
 import main
 import planilha
@@ -92,55 +93,78 @@ def test_data_invalida():
     args = main.argumentos(["--planilha", "x.xlsx", "--data", "2026-07-30"])
 
     with pytest.raises(main.ErroDeUso, match="Data invalida"):
-        main._data_da_tarefa(args)
+        main._agenda_da_rodada(args)
 
 
-def test_data_padrao_e_hoje():
+def test_sem_datas_na_cli_e_hoje():
     args = main.argumentos(["--planilha", "x.xlsx"])
 
-    assert main._data_da_tarefa(args) == datetime.date.today().strftime("%d/%m/%Y")
+    agenda = main._agenda_da_rodada(args)
+    assert agenda == datas.Agenda() and not agenda.escolhida
+
+
+def test_inicio_e_apelido_de_data():
+    args = main.argumentos(["--planilha", "x.xlsx", "--inicio", "01/10/2026 09:00",
+                            "--fim", "01/10/2026 11:00", "--publicacao",
+                            "25/09/2026", "--disponibilizacao", "24/09/2026"])
+
+    assert main._agenda_da_rodada(args) == datas.Agenda(
+        "01/10/2026", "09:00:00", "01/10/2026", "11:00:00", "25/09/2026",
+        "24/09/2026")
 
 
 def _dia(delta: int) -> str:
     return (datetime.date.today() + datetime.timedelta(days=delta)).strftime("%d/%m/%Y")
 
 
-def test_data_passada_com_status_que_o_legal_one_barra_e_recusada():
-    # Pendente com data passada e recusado pelo Legal One em cada processo; a
-    # rodada inteira viraria erro ate o disjuntor.
-    pendente = config.PerfilTarefa("pendente-teste", "TAREFA X", status="Pendente")
-    args = main.argumentos(["--planilha", "x.xlsx", "--data", _dia(-1)])
+def _com_perfil(cnj, perfil, agenda=None):
+    proc = processo(cnj)
+    proc.perfil = perfil
+    proc.agenda = agenda
+    return proc
 
-    with pytest.raises(main.ErroDeUso, match="Pendente"):
-        main._conferir_data_passada(args, [pendente])
+
+PENDENTE = config.PerfilTarefa("pendente-teste", "TAREFA X", status="Pendente")
+
+
+def test_pendente_com_conclusao_passada_e_recusado_antes_do_chrome():
+    # O Legal One recusa em cada processo; a rodada inteira viraria erro ate o
+    # disjuntor.
+    with pytest.raises(main.ErroDeUso, match="Pendente") as erro:
+        main._conferir_datas(datas.Agenda(inicio=_dia(-1)),
+                             [_com_perfil("A", PENDENTE)])
+    assert "2026!L2" in str(erro.value)
 
 
 def test_data_passada_com_cumprido_so_avisa(caplog):
-    args = main.argumentos(["--planilha", "x.xlsx", "--data", _dia(-7)])
-
-    main._conferir_data_passada(args, [config.PERFIS["defesa-faturada"]])
+    main._conferir_datas(datas.Agenda(inicio=_dia(-7)),
+                         [_com_perfil("A", config.PERFIS["defesa-faturada"])])
 
     assert "anterior a hoje" in caplog.text
 
 
-@pytest.mark.parametrize("argv", [[], ["--data", _dia(0)], ["--data", _dia(3)]])
-def test_hoje_ou_futuro_nao_passa_pela_conferencia(argv, caplog):
-    pendente = config.PerfilTarefa("pendente-teste", "TAREFA X", status="Pendente")
-    args = main.argumentos(["--planilha", "x.xlsx", *argv])
-
-    main._conferir_data_passada(args, [pendente])
+@pytest.mark.parametrize("agenda", [
+    datas.Agenda(), datas.Agenda(inicio=_dia(0)), datas.Agenda(inicio=_dia(3))])
+def test_hoje_ou_futuro_passa_sem_aviso(agenda, caplog):
+    main._conferir_datas(agenda, [_com_perfil("A", PENDENTE)])
 
     assert "anterior a hoje" not in caplog.text
 
 
-def test_data_passada_confere_todos_os_perfis_da_rodada():
-    # Nos modos auto e planilha a fila mistura perfis; basta um Pendente.
-    pendente = config.PerfilTarefa("pendente-teste", "TAREFA X", status="Pendente")
-    args = main.argumentos(["--planilha", "x.xlsx", "--data", _dia(-1)])
+def test_inicio_depois_da_conclusao_e_recusado():
+    with pytest.raises(main.ErroDeUso, match="depois da conclusao"):
+        main._conferir_datas(datas.Agenda(inicio=_dia(3), fim=_dia(2)),
+                             [_com_perfil("A", config.PERFIS["defesa-faturada"])])
 
+
+def test_datas_da_linha_ganham_das_da_rodada_na_conferencia():
+    # A rodada pede hoje; a linha, ontem, num perfil Pendente: e a da linha que
+    # vale, e ela e recusada.
     with pytest.raises(main.ErroDeUso, match="Pendente"):
-        main._conferir_data_passada(
-            args, [config.PERFIS["defesa-faturada"], pendente])
+        main._conferir_datas(
+            datas.Agenda(inicio=_dia(0)),
+            [_com_perfil("A", PENDENTE, datas.Agenda(fim=_dia(-1),
+                                                     inicio=_dia(-1)))])
 
 
 def test_trava_de_planilha_por_perfil():
@@ -851,3 +875,53 @@ def test_rodada_no_modo_planilha_ponta_a_ponta(dados_tmp, monkeypatch, tmp_path)
     assert relatorio[ACHADO]["RESPONSAVEL"] == NATHALIA
     assert relatorio[ACHADO]["TIPO_TAREFA"] == "Diversos / Contato Telefônico"
     assert relatorio[CORRIGIDO]["STATUS_TAREFA"] == "Cumprido"
+
+
+def test_data_mal_escrita_numa_linha_e_erro_com_a_origem():
+    proc = _da_planilha("A", "CONFERIR CUSTAS", status="Pendente", responsavel=PEDRO)
+    proc.campos_tarefa["inicio"] = "31/02/2026"
+
+    with pytest.raises(main.ErroDeUso, match="inicio") as erro:
+        main._atribuir_perfis(_args("--tarefa", "planilha"),
+                              config.PERFIL_PLANILHA, [proc])
+    assert "2026!L2" in str(erro.value)
+
+
+def test_rodada_com_datas_da_linha_e_da_cli(dados_tmp, monkeypatch, tmp_path):
+    """Datas na planilha por cima das da linha de comando, ate o ledger."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Tarefas"
+    ws.append(["PROCESSO", "DESCRIÇÃO DA TAREFA", "STATUS DA TAREFA",
+               "RESPONSÁVEL DA TAREFA", "INÍCIO DA TAREFA",
+               "PUBLICAÇÃO DA TAREFA"])
+    amanha = datetime.date.today() + datetime.timedelta(days=1)
+    ws.append([ACHADO, "CONFERIR CUSTAS", "Pendente", "pedro",
+               datetime.datetime.combine(amanha, datetime.time(16, 0)), None])
+    ws.append([CORRIGIDO, "CONFERIR CUSTAS", "Pendente", "pedro", None,
+               "25/09/2026"])
+    arq = tmp_path / "Tarefas.xlsx"
+    wb.save(arq)
+    automador = AutomadorFalso({ACHADO: achou("111"), CORRIGIDO: achou("222")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+    dia = amanha.strftime("%d/%m/%Y")
+
+    assert main.main(["--planilha", str(arq), "--tarefa", "planilha", "--executar",
+                      "--data", "09:00", "--publicacao", "20/09/2026"]) == main.SAIDA_OK
+
+    a, b = automador.enviadas
+    # Linha 1: inicio da linha (amanha 16h), 30 min de duracao, publicacao da CLI.
+    assert (a.data_inicio, a.hora_inicio, a.data_fim, a.hora_fim,
+            a.data_publicacao, a.confirmar_data_passada) == (
+        dia, "16:00:00", dia, "16:30:00", "20/09/2026", True)
+    # Linha 2: hora da CLI no dia de hoje, publicacao da linha. So a hora foi
+    # pedida, o dia nao: data passada nao seria confirmada.
+    hoje = datetime.date.today().strftime("%d/%m/%Y")
+    assert (b.data_inicio, b.hora_inicio, b.hora_fim, b.data_publicacao,
+            b.confirmar_data_passada) == (
+        hoje, "09:00:00", "09:30:00", "25/09/2026", False)
+    relatorio = {linha["PROCESSO"]: linha
+                 for linha in _linhas_csv(dados_tmp / "relatorio.csv")}
+    assert relatorio[ACHADO]["DATA_INICIO"] == f"{dia} 16:00:00"
+    assert relatorio[CORRIGIDO]["DATA_PUBLICACAO"] == "25/09/2026"

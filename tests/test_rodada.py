@@ -10,6 +10,7 @@ import pytest
 
 import catalogo
 import config
+import datas
 import ledger as ledger_mod
 import legalone
 import main
@@ -703,7 +704,7 @@ def test_sem_data_fixa_a_tarefa_leva_a_data_de_hoje(registro, perfil):
 def test_data_fixa_vale_para_inicio_e_fim(registro, perfil):
     automador = AutomadorFalso({CNJ: achou()})
     rodada(automador, registro, perfil, executar=True,
-           data_fixa="15/10/2026").executar_fila([processo()])
+           agenda=datas.Agenda(inicio="15/10/2026")).executar_fila([processo()])
 
     enviada = automador.enviadas[0]
     assert (enviada.data_inicio, enviada.data_fim) == ("15/10/2026", "15/10/2026")
@@ -712,7 +713,7 @@ def test_data_fixa_vale_para_inicio_e_fim(registro, perfil):
 def test_ledger_guarda_a_tarefa_que_foi_enviada(registro, perfil):
     automador = AutomadorFalso({CNJ: achou()})
     rodada(automador, registro, perfil, executar=True,
-           data_fixa="15/10/2026").executar_fila([processo()])
+           agenda=datas.Agenda(inicio="15/10/2026")).executar_fila([processo()])
 
     linha = registro.con.execute(
         "SELECT tipo, status, responsavel, data_inicio, data_fim FROM processos "
@@ -728,7 +729,7 @@ def test_erro_depois_do_formulario_guarda_a_tarefa_tentada(registro, perfil):
     automador = AutomadorFalso({CNJ: achou()},
                                ao_cadastrar=RuntimeError("timeout"))
     rodada(automador, registro, perfil, executar=True,
-           data_fixa="15/10/2026").executar_fila([processo()])
+           agenda=datas.Agenda(inicio="15/10/2026")).executar_fila([processo()])
 
     linha = registro.con.execute(
         "SELECT situacao, data_inicio FROM processos WHERE cnj = ?", (CNJ,)
@@ -766,7 +767,7 @@ def test_so_a_data_escolhida_confirma_o_aviso_de_data_passada(registro, perfil):
     rodada(sem_data, registro, perfil, executar=True).executar_fila([processo()])
     com_data = AutomadorFalso({CNJ: achou()})
     rodada(com_data, registro, perfil, executar=True,
-           data_fixa="01/09/2026").executar_fila([processo()])
+           agenda=datas.Agenda(inicio="01/09/2026")).executar_fila([processo()])
 
     assert sem_data.enviadas[0].confirmar_data_passada is False
     assert com_data.enviadas[0].confirmar_data_passada is True

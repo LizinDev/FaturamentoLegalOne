@@ -15,6 +15,10 @@ logs/
 # Relatorios em texto para a supervisao trazem os mesmos dados. Ancorado na
 # raiz e com prefixo proprio para nao pegar requirements.txt.
 /Relatorio*.txt
+# Planilhas recebidas e entregas a supervisao. Ignoradas pelo nome da pasta, e
+# nao so pela extensao: um PDF ou TXT posto ali tambem traz numero de processo.
+/Planilhas/
+/Cadastros/
 # Pastas de entrega por ano (relatorios, copia do ledger, logs, scripts locais):
 # tudo com numero de processo.
 /Faturamento 20*/

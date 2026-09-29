@@ -1,6 +1,7 @@
 """Leitura da planilha de cobrancas -> lista de processos unicos."""
 import collections
 import dataclasses
+import datetime
 import logging
 import re
 from collections.abc import Callable
@@ -9,6 +10,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 import config
+import datas
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +36,14 @@ class Processo:
     # Onde o processo aparece, no formato "aba!Lnn" — um processo repetido em
     # varias linhas/abas vira uma entrada so, com todas as origens.
     linhas: list[str] = dataclasses.field(default_factory=list)
-    # Com --tarefa planilha: tipo, status e responsavel como vieram das colunas
-    # "... DA TAREFA" da linha ("" onde a celula estava vazia).
+    # Com --tarefa planilha: tipo, status, responsavel e datas como vieram das
+    # colunas "... DA TAREFA" da linha ("" onde a celula estava vazia).
     campos_tarefa: dict[str, str] = dataclasses.field(default_factory=dict)
     # O perfil completo da tarefa deste processo. Quem le a planilha nao o
     # preenche: e a preparacao da rodada que junta linha, flags e tarefas.toml.
     perfil: "config.PerfilTarefa | None" = None
+    # As datas pedidas na propria linha (modo planilha); por cima das da rodada.
+    agenda: "datas.Agenda | None" = None
 
     @property
     def origem(self) -> str:
@@ -186,6 +190,14 @@ def ler(
                         "status": _celula(linha, indices, config.COLUNA_STATUS_TAREFA),
                         "responsavel": _celula(linha, indices,
                                                config.COLUNA_RESPONSAVEL_TAREFA),
+                        "inicio": _celula_data(linha, indices,
+                                               config.COLUNA_INICIO_TAREFA),
+                        "fim": _celula_data(linha, indices,
+                                            config.COLUNA_CONCLUSAO_TAREFA),
+                        "publicacao": _celula_data(linha, indices,
+                                                   config.COLUNA_PUBLICACAO_TAREFA),
+                        "disponibilizacao": _celula_data(
+                            linha, indices, config.COLUNA_DISPONIBILIZACAO_TAREFA),
                     }
                 elif tarefa_da_linha is not None:
                     tarefa = tarefa_da_linha(tipo) or ""
@@ -250,6 +262,27 @@ def ler(
     return processos
 
 
+def _celula_data(linha, indices: dict[str, int], coluna: str) -> str:
+    """Celula de data/hora como texto DD/MM/AAAA [HH:MM:SS] ("" se vazia).
+
+    O openpyxl devolve celula de data como datetime, e str() dela daria
+    "2026-09-29 00:00:00". Texto digitado passa como esta: quem o le e
+    interpreta, com as mensagens de erro, e o datas.py. Meia-noite e "sem hora"
+    — e como o Excel guarda uma data sem hora.
+    """
+    i = indices.get(coluna)
+    valor = linha[i] if i is not None and i < len(linha) else None
+    if isinstance(valor, datetime.datetime):
+        if valor.time() == datetime.time(0):
+            return valor.strftime("%d/%m/%Y")
+        return valor.strftime("%d/%m/%Y %H:%M:%S")
+    if isinstance(valor, datetime.date):
+        return valor.strftime("%d/%m/%Y")
+    if isinstance(valor, datetime.time):
+        return valor.strftime("%H:%M:%S")
+    return _celula(linha, indices, coluna)
+
+
 def _resumo(campos: dict[str, str]) -> str:
-    """tipo/status/responsavel de uma linha, para a mensagem de conflito."""
-    return "(" + ", ".join(f"{k}={v or '-'}" for k, v in campos.items()) + ")"
+    """Os campos preenchidos de uma linha, para a mensagem de conflito."""
+    return "(" + ", ".join(f"{k}={v}" for k, v in campos.items() if v) + ")"

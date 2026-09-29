@@ -24,6 +24,7 @@ import time
 
 import catalogo
 import config
+import datas
 import ledger as ledger_mod
 import legalone
 import planilha
@@ -96,17 +97,18 @@ def argumentos(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""exemplos:
   # simulacao das 20 primeiras (nao grava nada)
-  python main.py --planilha "C:/Users/Kamila/Downloads/Faturamento.xlsx" --limite 20
+  python main.py --planilha "../Planilhas/Faturamento 2024.xlsx" --limite 20
 
-  # cota do dia: para depois de 500 tarefas cadastradas
-  python main.py --planilha "C:/.../Faturamento.xlsx" --max-cadastros 500 --executar
+  # para depois de 500 tarefas cadastradas
+  python main.py --planilha "../Planilhas/Faturamento 2024.xlsx" \
+      --max-cadastros 500 --executar
 
-  # o dia seguinte, na outra planilha, com a outra tarefa
-  python main.py --planilha "C:/.../Defesa.xlsx" --tarefa defesa-faturada \\
+  # a planilha de defesas, com o perfil de defesa
+  python main.py --planilha "../Planilhas/Defesa.xlsx" --tarefa defesa-faturada \\
       --max-cadastros 500 --executar
 
   # rodada real, planilha inteira, retomavel
-  python main.py --planilha "C:/.../Faturamento.xlsx" --executar
+  python main.py --planilha "../Planilhas/Faturamento 2024.xlsx" --executar
 
   # so a aba 2026, cobrancas de encerramento
   python main.py --planilha "..." --abas 2026 --tipo-contem "ENCERRAMENTO" --executar
@@ -168,11 +170,20 @@ def argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--limite", type=inteiro_positivo,
                    help="examina no maximo N processos (inclui os nao encontrados)")
     p.add_argument("--max-cadastros", type=inteiro_positivo, metavar="N",
-                   help="para depois de N tarefas efetivamente cadastradas — "
-                        "use este para uma cota diaria de cadastros")
+                   help="para depois de N tarefas efetivamente cadastradas "
+                        "(recadastros contam)")
     p.add_argument("--processo", nargs="+", metavar="CNJ",
                    help="roda so estes numeros (util para testar ou refazer um caso)")
-    p.add_argument("--data", help="data da tarefa DD/MM/AAAA (padrao: hoje)")
+    p.add_argument("--data", "--inicio", dest="data", metavar="QUANDO",
+                   help="inicio da tarefa: DD/MM/AAAA, DD/MM/AAAA HH:MM ou so "
+                        "HH:MM (padrao: hoje, na hora que o formulario sugere)")
+    p.add_argument("--fim", metavar="QUANDO",
+                   help="conclusao da tarefa, nos mesmos formatos (padrao: o dia "
+                        "do inicio; com hora de inicio, 30 minutos depois)")
+    p.add_argument("--publicacao", metavar="DD/MM/AAAA",
+                   help="data de publicacao (padrao: a do formulario)")
+    p.add_argument("--disponibilizacao", metavar="DD/MM/AAAA",
+                   help="data de disponibilizacao (padrao: a do formulario)")
     p.add_argument("--executar", action="store_true",
                    help="grava de verdade (sem isso, apenas simula)")
     p.add_argument("--retentar", action="store_true",
@@ -275,13 +286,14 @@ class Rodada:
                  so_buscar: bool = False, rapido: bool = False,
                  pular_existentes: bool = False,
                  max_cadastros: int | None = None,
-                 data_fixa: str | None = None,
+                 agenda: datas.Agenda | None = None,
                  resolucao: catalogo.Resolucao | None = None):
         self.automador = automador
         self.registro = registro
         self.perfil = perfil
-        # --data. Sem ela, a data e a de hoje no instante de cada cadastro.
-        self.data_fixa = data_fixa
+        # As datas da linha de comando (--data, --fim...). Sem elas, a data e a
+        # de hoje no instante de cada cadastro.
+        self.agenda = agenda or datas.Agenda()
         # Tipo e responsavel conferidos no Legal One (ver _resolver_perfis).
         # Valor fora dela vai como esta, e o formulario so confere o tipo que
         # ja vem nele.
@@ -400,19 +412,24 @@ class Rodada:
             proc.tarefa, self.perfil)
         return self.resolucao.aplicar(perfil)
 
-    def _tarefa_de(self, proc: planilha.Processo) -> config.Tarefa:
-        """A tarefa a enviar para este processo, com a data resolvida agora.
+    def _agenda_de(self, proc: planilha.Processo) -> datas.Agenda:
+        """As datas pedidas para este processo: as da linha por cima das flags."""
+        return proc.agenda.sobre(self.agenda) if proc.agenda else self.agenda
 
-        Chamada logo antes do formulario, e nao no inicio da rodada: sem --data,
-        uma rodada que atravessa a meia-noite tem que mandar a data do dia novo.
+    def _tarefa_de(self, proc: planilha.Processo) -> config.Tarefa:
+        """A tarefa a enviar para este processo, com as datas resolvidas agora.
+
+        Chamada logo antes do formulario, e nao no inicio da rodada: sem data
+        pedida, uma rodada que atravessa a meia-noite tem que mandar a data do
+        dia novo.
         """
-        data = self.data_fixa or datetime.date.today().strftime(FORMATO_DATA)
-        # Com --data, a data foi escolhida: se for passada (ou virar passada na
-        # meia-noite), o aviso do Legal One e confirmado. Sem --data, o aviso so
-        # aparece num processo pego pela virada, e ai ele vira erro.
+        agenda = self._agenda_de(proc)
+        # Com data escolhida, se ela for passada (ou virar passada na
+        # meia-noite), o aviso do Legal One e confirmado. Sem data escolhida, o
+        # aviso so aparece num processo pego pela virada, e ai ele vira erro.
         return config.Tarefa.do_perfil(
-            self._perfil_de(proc), data,
-            confirmar_data_passada=self.data_fixa is not None,
+            self._perfil_de(proc), agenda.resolver(datetime.date.today()),
+            confirmar_data_passada=agenda.escolhida,
         )
 
     def _um_processo(self, proc: planilha.Processo, i: int, total: int) -> bool:
@@ -577,6 +594,9 @@ class Rodada:
             responsavel=tarefa.responsavel if tarefa else "",
             data_inicio=tarefa.inicio if tarefa else "",
             data_fim=tarefa.fim if tarefa else "",
+            data_publicacao=(tarefa.data_publicacao or "") if tarefa else "",
+            data_disponibilizacao=(tarefa.data_disponibilizacao or "")
+            if tarefa else "",
         )
 
     def _descartar_suspeitos(self) -> None:
@@ -746,6 +766,14 @@ def _atribuir_perfis(args: argparse.Namespace, perfil: config.PerfilTarefa,
             proc.perfil = _com_flags(config.PERFIS_POR_DESCRICAO[proc.tarefa], args)
         elif perfil.nome == config.NOME_PLANILHA:
             proc.perfil, motivo = _perfil_da_linha(proc, args)
+            try:
+                c = proc.campos_tarefa
+                proc.agenda = datas.Agenda.de_textos(
+                    c.get("inicio"), c.get("fim"), c.get("publicacao"),
+                    c.get("disponibilizacao"))
+            except ValueError as e:
+                motivo = f"{motivo}; {e}" if motivo else str(e)
+                proc.perfil = None
             if proc.perfil is None:
                 problemas.append(f"{proc.origem} ({proc.cnj_original}): {motivo}")
                 continue
@@ -782,37 +810,47 @@ def _conferir_planilha(args: argparse.Namespace, perfil: config.PerfilTarefa) ->
     )
 
 
-def _data_da_tarefa(args: argparse.Namespace) -> str:
-    data = args.data or datetime.date.today().strftime(FORMATO_DATA)
+def _agenda_da_rodada(args: argparse.Namespace) -> datas.Agenda:
+    """As datas da linha de comando. Data mal escrita e erro de uso."""
     try:
-        datetime.datetime.strptime(data, FORMATO_DATA)
-    except ValueError:
-        raise ErroDeUso(f"Data invalida: {data!r} (esperado DD/MM/AAAA)")
-    return data
+        return datas.Agenda.de_textos(args.data, args.fim, args.publicacao,
+                                      args.disponibilizacao)
+    except ValueError as e:
+        raise ErroDeUso(f"Data invalida: {e}")
 
 
-def _conferir_data_passada(args: argparse.Namespace,
-                           perfis: list[config.PerfilTarefa]) -> None:
-    """Recusa, antes de abrir o Chrome, a data passada que o Legal One barra.
+def _conferir_datas(agenda: datas.Agenda,
+                    processos: list[planilha.Processo]) -> None:
+    """Recusa, antes de abrir o Chrome, as datas que o Legal One barraria.
 
-    Sem isto cada processo da fila viraria erro com a mesma mensagem, ate o
-    disjuntor parar a rodada. Data passada com status aceito so gera um aviso:
-    o Legal One pede confirmacao, e a rodada confirma (ver Tarefa).
+    Inicio depois da conclusao e Pendente com conclusao no passado viram, no
+    Legal One, o mesmo erro em cada processo da fila, ate o disjuntor parar a
+    rodada. Aqui a rodada nem comeca, e a mensagem diz quais linhas. Data
+    passada aceita (Cumprido) so gera um aviso: o Legal One pede confirmacao,
+    e a rodada confirma (ver Tarefa).
     """
-    if not args.data:
-        return
-    data = datetime.datetime.strptime(args.data, FORMATO_DATA).date()
-    if data >= datetime.date.today():
-        return
-    recusados = sorted({p.status for p in perfis}
-                       & config.STATUS_RECUSADOS_NO_PASSADO)
-    if recusados:
+    hoje = datetime.date.today()
+    problemas: list[str] = []
+    passadas = 0
+    for proc in processos:
+        pedida = proc.agenda.sobre(agenda) if proc.agenda else agenda
+        resolvidas = pedida.resolver(hoje)
+        status = proc.perfil.status if proc.perfil else ""
+        for problema in resolvidas.problemas(hoje, status,
+                                             config.STATUS_RECUSADOS_NO_PASSADO):
+            problemas.append(f"{proc.origem} ({proc.cnj_original}): {problema}")
+        if pedida.escolhida and min(
+                datetime.datetime.strptime(d, datas.FORMATO_DATA).date()
+                for d in (resolvidas.inicio, resolvidas.fim)) < hoje:
+            passadas += 1
+    if problemas:
         raise ErroDeUso(
-            f"--data {args.data} e anterior a hoje, e o Legal One nao aceita "
-            f"tarefa {', '.join(recusados)} com data passada."
+            "Data que o Legal One nao aceita:\n  " + "\n  ".join(problemas[:20])
+            + (f"\n  (e mais {len(problemas) - 20})" if len(problemas) > 20 else "")
         )
-    logger.warning("--data %s e anterior a hoje: o Legal One pede confirmacao "
-                   "e ela sera dada em cada cadastro.", args.data)
+    if passadas:
+        logger.warning("%d processo(s) com data anterior a hoje: o Legal One pede "
+                       "confirmacao e ela sera dada em cada cadastro.", passadas)
 
 
 def _resolver_perfis(automador, perfis: list[config.PerfilTarefa]
@@ -892,7 +930,7 @@ def _montar_fila(args: argparse.Namespace, registro: ledger_mod.Ledger,
 
 
 def _log_cabecalho(args: argparse.Namespace, perfil: config.PerfilTarefa,
-                   data_tarefa: str, processos: list, fila: list,
+                   agenda: datas.Agenda, processos: list, fila: list,
                    pular: set[tuple[str, str]]) -> None:
     logger.info("Perfil:      %s", perfil.nome)
     if perfil.nome == config.NOME_AUTO:
@@ -913,13 +951,34 @@ def _log_cabecalho(args: argparse.Namespace, perfil: config.PerfilTarefa,
         logger.info("Tarefa:      %r / tipo %r / status %r / responsavel %r",
                     perfil.descricao, perfil.tipo, perfil.status,
                     perfil.responsavel)
-    logger.info("Data:        %s", data_tarefa)
+    logger.info("Datas:       %s", _descrever_agenda(agenda, perfil))
     logger.info("Planilha:    %s", args.planilha)
     logger.info("             %d processo(s) unico(s)", len(processos))
     logger.info("Ja no ledger (%s): %d — fila desta rodada: %d",
                 perfil.nome, len(pular), len(fila))
     logger.info("MODO: %s", "EXECUCAO REAL (grava)" if args.executar
                 else "SIMULACAO (nao grava — use --executar para valer)")
+
+
+def _descrever_agenda(agenda: datas.Agenda, perfil: config.PerfilTarefa) -> str:
+    """As datas da rodada em uma linha, para o cabecalho."""
+    partes = []
+    if agenda.inicio or agenda.hora_inicio:
+        partes.append("inicio " + " ".join(filter(None, (
+            agenda.inicio or "hoje", agenda.hora_inicio))))
+    else:
+        partes.append("inicio hoje")
+    if agenda.fim or agenda.hora_fim:
+        partes.append("conclusao " + " ".join(filter(None, (
+            agenda.fim or "no dia do inicio", agenda.hora_fim))))
+    if agenda.publicacao:
+        partes.append(f"publicacao {agenda.publicacao}")
+    if agenda.disponibilizacao:
+        partes.append(f"disponibilizacao {agenda.disponibilizacao}")
+    texto = ", ".join(partes)
+    if perfil.nome == config.NOME_PLANILHA:
+        texto += " (a coluna da linha, quando preenchida, ganha)"
+    return texto
 
 
 # --- modos -------------------------------------------------------------------
@@ -960,7 +1019,7 @@ def _modo_rodada(args: argparse.Namespace) -> int:
 
     perfil = _perfil_da_rodada(args)
     _conferir_planilha(args, perfil)
-    data_tarefa = _data_da_tarefa(args)
+    agenda = _agenda_da_rodada(args)
 
     try:
         processos = planilha.ler(
@@ -975,11 +1034,11 @@ def _modo_rodada(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as e:
         raise ErroDeUso(str(e)) from e
     _atribuir_perfis(args, perfil, processos)
-    _conferir_data_passada(args, _perfis_distintos(processos))
+    _conferir_datas(agenda, processos)
 
     with ledger_mod.Ledger(config.LEDGER_FILE) as registro:
         processos, fila, pular = _montar_fila(args, registro, perfil, processos)
-        _log_cabecalho(args, perfil, data_tarefa, processos, fila, pular)
+        _log_cabecalho(args, perfil, agenda, processos, fila, pular)
 
         if not fila:
             logger.info("Nada a fazer.")
@@ -1022,7 +1081,7 @@ def _modo_rodada(args: argparse.Namespace) -> int:
             rapido=args.rapido,
             pular_existentes=args.pular_existentes,
             max_cadastros=args.max_cadastros,
-            data_fixa=args.data,
+            agenda=agenda,
             resolucao=resolucao,
         )
         try:

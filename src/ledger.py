@@ -14,7 +14,7 @@ import logging
 import sqlite3
 from collections import Counter
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS processos (
     responsavel     TEXT,
     data_inicio     TEXT,
     data_fim        TEXT,
+    data_publicacao TEXT,
+    data_disponibilizacao TEXT,
     PRIMARY KEY (cnj, tarefa)
 )
 """
@@ -111,12 +113,15 @@ COLUNAS_NOVAS = [
     ("responsavel", "TEXT"),
     ("data_inicio", "TEXT"),
     ("data_fim", "TEXT"),
+    ("data_publicacao", "TEXT"),
+    ("data_disponibilizacao", "TEXT"),
 ]
 
 # Campos que descrevem a tarefa enviada ao Legal One. Seguem a trava de
 # rebaixamento, como situacao e detalhe: uma passada posterior que falhou nao
 # pode reescrever a data ou o status de uma tarefa que nos ja criamos.
-CAMPOS_DA_TAREFA = ("tipo", "status", "responsavel", "data_inicio", "data_fim")
+CAMPOS_DA_TAREFA = ("tipo", "status", "responsavel", "data_inicio", "data_fim",
+                    "data_publicacao", "data_disponibilizacao")
 
 
 class Ledger:
@@ -241,6 +246,8 @@ class Ledger:
         responsavel: str = "",
         data_inicio: str = "",
         data_fim: str = "",
+        data_publicacao: str = "",
+        data_disponibilizacao: str = "",
     ) -> None:
         # Duas protecoes na reescrita de um registro que ja existe:
         #
@@ -267,8 +274,9 @@ class Ledger:
             "INSERT INTO processos "
             "  (cnj, tarefa, situacao, id_legalone, detalhe, origem, "
             "   tipo_cobranca, status_planilha, cnj_original, quando, "
-            "   tipo, status, responsavel, data_inicio, data_fim) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "   tipo, status, responsavel, data_inicio, data_fim, "
+            "   data_publicacao, data_disponibilizacao) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(cnj, tarefa) DO UPDATE SET "
             f"  situacao = CASE WHEN {_SQL_NAO_REBAIXAR} "
             "                  THEN processos.situacao ELSE excluded.situacao END, "
@@ -290,7 +298,8 @@ class Ledger:
             (cnj, tarefa, situacao, id_legalone, detalhe, origem, tipo_cobranca,
              status_planilha, cnj_original,
              datetime.now().isoformat(timespec="seconds"),
-             tipo, status, responsavel, data_inicio, data_fim),
+             tipo, status, responsavel, data_inicio, data_fim,
+             data_publicacao, data_disponibilizacao),
         )
         self.con.commit()
 
@@ -357,13 +366,25 @@ class Ledger:
         Os campos da tarefa (tipo, status, responsavel, datas) vem no fim, na
         ordem de CAMPOS_DA_TAREFA.
         """
+        seguinte = (date.fromisoformat(dia) + timedelta(days=1)).isoformat()
+        return self.cadastrados_entre(dia, seguinte)
+
+    def cadastrados_entre(self, desde: str, ate: str) -> list[tuple]:
+        """Cadastros feitos por nos com `quando` em [desde, ate).
+
+        desde/ate no formato do ledger, com a precisao que se quiser
+        ("2026-09-10" ou "2026-09-10T14:00"). E o recorte de uma leva: as levas
+        nao coincidem com dias — uma atravessa a meia-noite, um dia tem duas.
+        Mesmas colunas de cadastrados_em.
+        """
         marcas = ",".join("?" * len(NOSSOS_CADASTROS))
         return self.con.execute(
             f"SELECT cnj, tarefa, id_legalone, tipo_cobranca, status_planilha, "
             f"       origem, quando, situacao, {', '.join(CAMPOS_DA_TAREFA)} "
-            f"FROM processos WHERE situacao IN ({marcas}) AND quando LIKE ? "
+            f"FROM processos WHERE situacao IN ({marcas}) "
+            f"  AND quando >= ? AND quando < ? "
             f"ORDER BY tarefa, quando",
-            (*NOSSOS_CADASTROS, f"{dia}%"),
+            (*NOSSOS_CADASTROS, desde, ate),
         ).fetchall()
 
     def dias_com_cadastro(self) -> list[str]:
@@ -401,7 +422,7 @@ class Ledger:
                 ["PROCESSO", "TAREFA", "SITUACAO", "ID_LEGALONE", "DETALHE",
                  "TIPO_COBRANCA", "STATUS_PLANILHA", "ORIGEM", "QUANDO",
                  "TIPO_TAREFA", "STATUS_TAREFA", "RESPONSAVEL", "DATA_INICIO",
-                 "DATA_FIM"]
+                 "DATA_FIM", "DATA_PUBLICACAO", "DATA_DISPONIBILIZACAO"]
             )
             escritor.writerows(linhas)
         logger.info("Relatorio salvo: %s (%d linha[s])", caminho, len(linhas))

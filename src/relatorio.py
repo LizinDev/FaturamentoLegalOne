@@ -32,6 +32,8 @@ CABECALHO = [
     # recebe a planilha ja conhece.
     ("INÍCIO", 18),
     ("CONCLUSÃO", 18),
+    ("PUBLICAÇÃO", 14),
+    ("DISPONIBILIZAÇÃO", 18),
 ]
 
 _PREENCHIMENTO = PatternFill("solid", fgColor="1F3864")
@@ -63,7 +65,7 @@ def gerar_planilha_do_dia(caminho: str | Path, dia: str, linhas: list[tuple]) ->
 
     for i, linha in enumerate(linhas, 2):
         (cnj, tarefa, id_lo, tipo_cob, status_pl, origem, quando, situacao,
-         tipo, status, responsavel, inicio, fim) = linha
+         tipo, status, responsavel, inicio, fim, publicacao, disponibilizacao) = linha
         ws.cell(row=i, column=1, value=cnj)
         ws.cell(row=i, column=2, value=int(id_lo) if str(id_lo).isdigit() else id_lo)
         # Os valores vem do ledger, e nao do perfil: sao os que foram enviados
@@ -81,6 +83,8 @@ def gerar_planilha_do_dia(caminho: str | Path, dia: str, linhas: list[tuple]) ->
                 value="Sim" if situacao == ledger.RECADASTRADA else "")
         ws.cell(row=i, column=12, value=inicio or "")
         ws.cell(row=i, column=13, value=fim or "")
+        ws.cell(row=i, column=14, value=publicacao or "")
+        ws.cell(row=i, column=15, value=disponibilizacao or "")
 
     ws.freeze_panes = "A2"
     if linhas:

@@ -79,7 +79,9 @@ def test_erro_pode_virar_ok(registro):
 
 TAREFA_ENVIADA = {"tipo": "Diversos", "status": "Cumprido",
                   "responsavel": "Heloiza Helena de Araujo",
-                  "data_inicio": "29/09/2026", "data_fim": "29/09/2026"}
+                  "data_inicio": "29/09/2026", "data_fim": "29/09/2026",
+                  "data_publicacao": "25/09/2026",
+                  "data_disponibilizacao": "24/09/2026"}
 
 
 def _campos_da_tarefa(registro, cnj, tarefa):
@@ -280,7 +282,8 @@ def test_exportar_csv(registro, tmp_path):
                              "ENCERRAMENTO"]
     # Os campos da tarefa entram depois das colunas antigas, sem desloca-las.
     assert linhas[0][9:] == ["TIPO_TAREFA", "STATUS_TAREFA", "RESPONSAVEL",
-                             "DATA_INICIO", "DATA_FIM"]
+                             "DATA_INICIO", "DATA_FIM", "DATA_PUBLICACAO",
+                             "DATA_DISPONIBILIZACAO"]
 
 
 # --- lista de conferencia manual ---------------------------------------------
@@ -475,7 +478,8 @@ def test_historico_ganha_os_valores_das_duas_tarefas_antigas(tmp_path):
         campos = _campos_da_tarefa(led, CNJ, DEFESA)
         # Tudo o que foi cadastrado ate a 1.7 era Diversos / Cumprido / Heloiza.
         assert campos == {**ledger_mod.VALORES_HISTORICOS,
-                          "data_inicio": None, "data_fim": None}
+                          "data_inicio": None, "data_fim": None,
+                          "data_publicacao": None, "data_disponibilizacao": None}
 
         # Registro novo sem o dado nao e preenchido com o valor historico: ele
         # so vale para o que existia quando a coluna nasceu.
@@ -548,3 +552,25 @@ def test_registro_da_17_no_ledger_ja_migrado_ganha_o_historico(tmp_path):
         led.registrar("NOVO", DEFESA, ledger_mod.NAO_ENCONTRADO)
     with ledger_mod.Ledger(caminho) as led:
         assert _campos_da_tarefa(led, "NOVO", DEFESA)["tipo"] == ""
+
+
+def test_cadastrados_entre_recorta_a_leva_por_horario(registro):
+    # Uma leva atravessa a meia-noite e um dia tem duas: o recorte e por
+    # horario, com o fim exclusivo.
+    registro.con.executemany(
+        "INSERT INTO processos (cnj, tarefa, situacao, quando) VALUES (?, ?, ?, ?)",
+        [
+            ("A", FATURAMENTO, ledger_mod.OK, "2026-09-09T21:49:59"),
+            ("B", FATURAMENTO, ledger_mod.OK, "2026-09-09T21:50:00"),
+            ("C", FATURAMENTO, ledger_mod.RECADASTRADA, "2026-09-10T00:30:00"),
+            ("D", FATURAMENTO, ledger_mod.ERRO, "2026-09-10T00:40:00"),
+            ("E", FATURAMENTO, ledger_mod.OK, "2026-09-10T14:00:00"),
+        ],
+    )
+    registro.con.commit()
+
+    leva = registro.cadastrados_entre("2026-09-09T21:50", "2026-09-10T14:00")
+
+    assert [linha[0] for linha in leva] == ["B", "C"]
+    # O dia continua sendo o mesmo recorte, de meia-noite a meia-noite.
+    assert [linha[0] for linha in registro.cadastrados_em("2026-09-10")] == ["C", "E"]

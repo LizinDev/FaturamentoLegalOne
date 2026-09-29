@@ -10,9 +10,10 @@ operar*.
 - [Como as flags se combinam](#como-as-flags-se-combinam)
 - [Códigos de saída](#códigos-de-saída)
 - [Variáveis de ambiente](#variáveis-de-ambiente)
-- [Arquivos gerados](#arquivos-gerados)
+- [Pastas e arquivos](#pastas-e-arquivos)
 - [A planilha de entrada](#a-planilha-de-entrada)
 - [Perfis de tarefa](#perfis-de-tarefa)
+- [Scripts de operação](#scripts-de-operação)
 - [Quando algo dá errado](#quando-algo-dá-errado)
 - [Ajustes finos](#ajustes-finos)
 
@@ -28,6 +29,8 @@ pip install -r requirements.txt
 ```
 
 Precisa de Python 3.10 ou mais novo (o código usa `str | Path` e `set[str]`).
+No 3.10 o `requirements.txt` instala também o `tomli`, que lê o `tarefas.toml`;
+da 3.11 em diante isso já vem no Python.
 
 ### Abrir o Chrome em modo debug
 
@@ -52,7 +55,7 @@ programa usa. Se essa janela fechar no meio da rodada, a rodada morre junto.
 
 ```powershell
 cd src
-python main.py --planilha "C:\Users\Kamila\Downloads\Faturamento.xlsx" --limite 3
+python main.py --planilha "..\Planilhas\Faturamento 2024.xlsx" --limite 3
 ```
 
 Sem `--executar` isso é simulação: preenche o formulário inteiro e não salva
@@ -67,17 +70,20 @@ O normal é rodar a planilha inteira e deixar ir até o fim. `--max-cadastros`
 existe para quando você quiser parar num número — não há limite diário a
 respeitar.
 
+As planilhas recebidas ficam em `Planilhas\`, na raiz do projeto (ver
+[Pastas e arquivos](#pastas-e-arquivos)); os exemplos rodam de dentro de `src\`.
+
 **Faturamento:**
 
 ```powershell
 cd C:\Users\Kamila\projetos\FaturamentoLegalOne\src
-python main.py --planilha "C:\Users\Kamila\Downloads\Faturamento.xlsx" --executar
+python main.py --planilha "..\Planilhas\Faturamento 2024.xlsx" --executar
 ```
 
 **Defesa:**
 
 ```powershell
-python main.py --planilha "C:\Users\Kamila\Downloads\Defesas.xlsx" --tarefa defesa-faturada --executar
+python main.py --planilha "..\Planilhas\Defesas.xlsx" --tarefa defesa-faturada --executar
 ```
 
 O nome do arquivo não é livre: cada perfil exige um trecho no caminho da
@@ -93,6 +99,21 @@ python main.py --planilha "..\Planilha de Faturamento.xlsx" --abas "2019-2020-20
 Aqui cada linha recebe a tarefa que a coluna da cobrança indica. Ver
 [`--tarefa auto`](#valores-da-tarefa).
 
+**Uma tarefa que não é de faturamento nem de defesa:**
+
+```powershell
+# avulsa, só nesta rodada
+python main.py --planilha "..\Planilhas\Custas.xlsx" --descricao "CONFERIR CUSTAS" --status Pendente --responsavel "Nathalia Maria Gatto Pinto" --data 01/10/2026
+# ou a planilha diz a tarefa de cada linha
+python main.py --planilha "..\Planilhas\Tarefas.xlsx" --tarefa planilha
+```
+
+Sem `--executar`, as duas são simulação. **Leia o cabeçalho antes de repetir com
+`--executar`**: ele mostra cada combinação de tarefa e quantos processos a pedem,
+e as linhas `Conferido:` mostram o tipo e o responsável como o Legal One os
+achou. Se a tarefa for recorrente, vale virar um perfil no `tarefas.toml` (ver
+[Perfis de tarefa](#perfis-de-tarefa)).
+
 Não é preciso anotar por onde parou nem qual planilha foi a última. O ledger
 guarda o progresso **por tarefa**, então cada rodada pega o que ainda não foi
 cadastrado daquele perfil. Ao terminar, a planilha do dia é gerada sozinha
@@ -101,7 +122,9 @@ em `data/`.
 Uma rodada de milhares de processos leva horas e vai ser interrompida —
 sessão que expira, máquina que reinicia. Isso é esperado e não custa nada:
 repetir o mesmo comando retoma de onde parou. Ao fim, uma passada de
-`--retentar` recolhe o que falhou pelo caminho.
+`--retentar` recolhe o que falhou pelo caminho. Para uma rodada de horas sem
+vigiar, use o `scripts\rodada_ate_a_meta.ps1`, que solta o Python destacado e o
+religa depois de um disjuntor (ver [Scripts de operação](#scripts-de-operação)).
 
 Ao fim de cada rodada, o resumo sai no console:
 
@@ -126,7 +149,11 @@ precisa estar presente**.
 | Flag | Argumento | Padrão |
 | --- | --- | --- |
 | `--planilha` | caminho do `.xlsx` | — (obrigatória, salvo com `--relatorio`) |
-| `--tarefa` | `faturamento-final` \| `defesa-faturada` \| `auto` | `faturamento-final` |
+| `--tarefa` | um perfil do `tarefas.toml` \| `auto` \| `planilha` | `faturamento-final` |
+| `--descricao` | texto | — (tarefa avulsa; exige `--status` e `--responsavel`) |
+| `--tipo` | caminho na árvore de tipos | o do perfil (avulsa: `Diversos`) |
+| `--status` | um dos seis status do Legal One | o do perfil |
+| `--responsavel` | usuário ativo do Legal One | o do perfil |
 | `--forcar-planilha` | — | desligada |
 | `--abas` | um ou mais nomes de aba | todas as abas |
 | `--tipo-contem` | trecho de texto | sem filtro |
@@ -134,7 +161,10 @@ precisa estar presente**.
 | `--limite` | inteiro ≥ 1 | sem limite |
 | `--max-cadastros` | inteiro ≥ 1 | sem limite |
 | `--processo` | um ou mais números CNJ | toda a planilha |
-| `--data` | `DD/MM/AAAA` | hoje |
+| `--data` ou `--inicio` | `DD/MM/AAAA`, `DD/MM/AAAA HH:MM` ou `HH:MM` | hoje, hora do formulário |
+| `--fim` | idem | o dia do início (com hora de início, 30 min depois) |
+| `--publicacao` | `DD/MM/AAAA` | a do formulário |
+| `--disponibilizacao` | `DD/MM/AAAA` | a do formulário |
 | `--executar` | — | desligada (simula) |
 | `--retentar` | — | desligada |
 | `--rapido` | — | desligada |
@@ -256,6 +286,14 @@ A tarefa inteira sai de cada linha, pelas colunas:
 | `TIPO DA TAREFA` | `--tipo`; senão o perfil de mesma descrição; senão `Diversos` |
 | `STATUS DA TAREFA` | `--status`; senão o perfil de mesma descrição |
 | `RESPONSÁVEL DA TAREFA` | `--responsavel`; senão o perfil de mesma descrição |
+| `INÍCIO DA TAREFA` | `--data`; senão hoje |
+| `CONCLUSÃO DA TAREFA` | `--fim`; senão o dia do início (com hora de início, 30 min depois) |
+| `PUBLICAÇÃO DA TAREFA` | `--publicacao`; senão a do formulário |
+| `DISPONIBILIZAÇÃO DA TAREFA` | `--disponibilizacao`; senão a do formulário |
+
+As colunas de início e conclusão aceitam hora na mesma célula
+(`01/10/2026 09:00`) e célula de data/hora do Excel. Uma célula de data do Excel
+às 00:00 é lida como "sem hora" — é assim que o Excel guarda uma data pura.
 
 Se a descrição de uma linha for a de um perfil do `tarefas.toml` (sem ligar
 para caixa e espaços), o perfil completa o que a linha e as flags não disserem,
@@ -277,11 +315,9 @@ mesma tarefa (mesma descrição) no mesmo processo, com tipo, status ou
 responsável diferentes entre as linhas, encerra com código 2 — o ledger guarda
 um cadastro por par (processo, descrição).
 
-Tipo (`Diversos`), status (`Cumprido`) e responsável (`Heloiza Helena de
-Araujo`) são iguais nos dois. O ledger é indexado por **(processo, tarefa)**, de
-modo que o mesmo processo pode receber as duas sem que uma rodada pule a outra.
-
-**`--tarefa auto`** é para a planilha que mistura as duas tarefas na mesma aba.
+**`--tarefa auto`** é para a planilha que mistura faturamento e defesa na mesma
+aba. O ledger é indexado por **(processo, tarefa)**, de modo que o mesmo processo
+pode receber as duas sem que uma rodada pule a outra.
 Cada linha recebe a tarefa que a sua coluna `TIPO DE COBRANÇA` indica:
 
 | Célula (ignorando caixa e espaços) | Tarefa cadastrada |
@@ -306,10 +342,25 @@ tarefas** — são etapas diferentes do mesmo caso.
 python main.py --planilha "..\Planilha de Faturamento.xlsx" --abas "2019-2020-2021" --tarefa auto --executar
 ```
 
-**`--data DD/MM/AAAA`**
+**`--data QUANDO`** (ou `--inicio`), **`--fim QUANDO`**, **`--publicacao`**, **`--disponibilizacao`**
 
-Data de início e fim da tarefa. Sem ela, hoje. Data mal formada ou inexistente
-(`31/02/2026`) encerra com código 2 antes de abrir o Chrome.
+As datas da tarefa. `QUANDO` é `DD/MM/AAAA`, `DD/MM/AAAA HH:MM` ou só `HH:MM`
+(o dia fica sendo o do cadastro); `9h` e `9h30` também valem. Publicação e
+disponibilização são só data, como no formulário.
+
+| Pedido | Vai ao formulário |
+| --- | --- |
+| nada | início e conclusão hoje, na hora que o formulário sugere (a próxima hora cheia) — o de sempre |
+| `--data 01/10/2026` | início e conclusão em 01/10, hora do formulário |
+| `--data "01/10/2026 09:00"` | 09:00 às **09:30** — sem hora de fim, a tarefa dura 30 minutos, como no Legal One |
+| `--data 09:00` | hoje, 09:00 às 09:30 |
+| `--data 01/10/2026 --fim "01/10/2026 10:00"` | 09:30 às 10:00 — sem hora de início, 30 minutos antes |
+| `--data 01/10/2026 --fim 03/10/2026` | de 01 a 03/10, hora do formulário |
+| `--publicacao 25/09/2026` | escrita por cima do que o subtipo sugerir |
+
+A hora que falta num dia só é completada pela outra, e não deixada para o
+formulário: a sugestão dele vem da hora atual e pode cair antes do início
+pedido, e o Legal One recusa início depois da conclusão.
 
 Sem `--data`, "hoje" é recalculado a cada tarefa cadastrada, não fixado no
 início da rodada. Numa rodada que atravessa a meia-noite, as tarefas cadastradas
@@ -317,19 +368,25 @@ antes da virada levam a data de ontem e as de depois levam a de hoje, na mesma
 execução. Use `--data` quando precisar que a rodada inteira registre uma data
 fixa.
 
-Data anterior a hoje é aceita com status Cumprido: o Legal One pede
+Antes de abrir o Chrome, cada processo é conferido contra o que o Legal One
+recusaria — data mal escrita (`31/02/2026`), **início depois da conclusão** e
+**Pendente com conclusão no passado** — e qualquer um deles encerra com código 2,
+listando as linhas. Data anterior a hoje com Cumprido é aceita: o Legal One pede
 confirmação (*Deseja salvar mesmo assim?*) e a rodada confirma em cada cadastro,
-avisando no início do log. Com um perfil Pendente, a rodada é recusada com
-código 2 antes de abrir o Chrome — o Legal One não aceita Pendente com data
-passada. Sem `--data`, o aviso nunca é confirmado: ele só aparece num processo
-pego pela meia-noite, que vira `erro` e é refeito pelo `--retentar` com a data
-do dia.
+avisando no início do log. A confirmação só é dada quando o **dia** foi pedido
+(`--data`, `--fim` ou a coluna da planilha); sem dia pedido, o aviso só aparece
+num processo pego pela meia-noite, que vira `erro` e é refeito pelo
+`--retentar` com a data do dia.
+
+No modo planilha, as colunas `INÍCIO DA TAREFA`, `CONCLUSÃO DA TAREFA`,
+`PUBLICAÇÃO DA TAREFA` e `DISPONIBILIZAÇÃO DA TAREFA` valem por cima dessas
+flags, campo a campo.
 
 **`--forcar-planilha`**
 
 Desliga a trava que confere se a planilha combina com o `--tarefa` escolhido.
 
-A trava está **ligada** nos dois perfis: o caminho da planilha precisa conter o
+A trava está **ligada** nos dois perfis de produção: o caminho da planilha precisa conter o
 trecho declarado em `dica_arquivo` (`Faturamento` para `faturamento-final`,
 `Defesa` para `defesa-faturada`), sem diferenciar maiúsculas. Rodar
 `--tarefa defesa-faturada` apontando para `Faturamento.xlsx` encerra com código
@@ -424,13 +481,19 @@ parece pegar processos "do meio" da planilha.
 
 1. **Leitura da planilha**, já aplicando `--abas`, `--tipo-contem` e
    `--status-planilha`.
-2. **Deduplicação por número CNJ.** O mesmo processo repetido em várias linhas ou
-   abas vira uma entrada só, com as origens agregadas.
-3. **Remoção do que já está no ledger** — tudo, ou só `ok` e `recadastrada` se
+2. **Deduplicação por (processo, tarefa).** O mesmo processo repetido em várias
+   linhas ou abas com a mesma tarefa vira uma entrada só, com as origens
+   agregadas.
+3. **A tarefa de cada processo**: o perfil (com as flags por cima), a coluna da
+   cobrança (`auto`) ou as colunas da tarefa (`planilha`), e as datas — conferidas
+   contra o que o Legal One recusaria.
+4. **Remoção do que já está no ledger** — tudo, ou só `ok` e `recadastrada` se
    `--retentar`. Numa simulação, nada é removido.
-4. **`--processo`**, se usada: mantém só os números pedidos e desfaz o passo 3.
-5. **`--limite`**: corta a fila resultante.
-6. **`--max-cadastros`**: interrompe o laço durante a execução.
+5. **`--processo`**, se usada: mantém só os números pedidos e desfaz o passo 4.
+6. **`--limite`**: corta a fila resultante.
+7. **Conferência no Legal One** do tipo e do responsável de cada tarefa da fila
+   (depois de conectar no Chrome; `--so-buscar` pula).
+8. **`--max-cadastros`**: interrompe o laço durante a execução.
 
 Combinações que o programa recusa:
 
@@ -440,6 +503,11 @@ Combinações que o programa recusa:
 | `--pular-existentes --rapido` | Encerra com código 2 |
 | nem `--planilha` nem `--relatorio` | Encerra com código 2 |
 | planilha sem o trecho exigido pelo `--tarefa` | Encerra com código 2 (salvo `--forcar-planilha`) |
+| `--descricao` com `--tarefa`, ou sem `--status`/`--responsavel` | Encerra com código 2 |
+| `--tarefa planilha` sem a coluna `DESCRIÇÃO DA TAREFA`, ou com linha incompleta | Encerra com código 2, listando as linhas |
+| início depois da conclusão; Pendente com conclusão no passado | Encerra com código 2, listando as linhas |
+| `tarefas.toml` com problema | Encerra com código 2 (`--help` e `--relatorio` seguem funcionando) |
+| tipo ou responsável que não casa com o Legal One | Encerra com código 2, antes do primeiro cadastro |
 
 Combinações inofensivas, que só rendem um aviso e seguem:
 
@@ -483,15 +551,27 @@ python main.py --planilha "..." --limite 5
 
 ---
 
-## Arquivos gerados
+## Pastas e arquivos
 
-Tudo em `data/` e `logs/`, que são criados sozinhos e **não vão para o Git** —
-contêm números de processo e nomes de clientes.
+Versionados no Git: o código (`src/`), os testes, os scripts de operação
+(`scripts/`) e os perfis (`tarefas.toml`). O resto fica **só nesta máquina** e
+não vai para o Git — contém números de processo e nomes de clientes:
+
+| Pasta | O que guarda |
+| --- | --- |
+| `data/` | O estado da automação, lido e escrito pelo programa (tabela abaixo). Criada sozinha |
+| `data/backups/` | Cópias do ledger feitas antes de mexer nele à mão (auditoria, remoção de fantasmas) e os scripts avulsos das rodadas de 10/09 |
+| `logs/` | `faturamento.log` e os logs de cada rodada longa. Criada sozinha |
+| `Planilhas/` | As planilhas de cobrança recebidas — a entrada das rodadas |
+| `Cadastros/` | O que foi entregue à supervisão: planilhas por leva, auditorias, relatórios |
+
+`Planilhas/` e `Cadastros/` são convenção de organização: o programa não
+depende delas, e `--planilha` aceita qualquer caminho.
 
 | Arquivo | O que é |
 | --- | --- |
 | `data/ledger.sqlite3` | O progresso. É o que permite retomar sem cadastrar nada duas vezes |
-| `data/relatorio.csv` | Uma linha por par (processo, tarefa) já processado, com situação e detalhe |
+| `data/relatorio.csv` | Uma linha por par (processo, tarefa) já processado, com situação, detalhe e os valores da tarefa enviada |
 | `data/nao_encontrados.csv` | Só o que precisa de conferência manual. Sai do ledger, então é acumulado entre rodadas |
 | `data/nao_encontrados_simulacao.csv` | O mesmo, quando a rodada é simulação. Arquivo separado para não apagar a lista acumulada |
 | `data/cadastrados_AAAA-MM-DD.xlsx` | A planilha do dia, a que vai para o supervisor |
@@ -502,7 +582,9 @@ brasileiro, sem assistente de importação.
 
 O ledger é o arquivo que importa preservar. Perdê-lo não causa cadastro
 duplicado (a checagem de duplicata continua protegendo), mas custa reprocessar
-milhares de buscas. Ele fica só nesta máquina.
+milhares de buscas. Ele fica só nesta máquina. Antes de mexer nele à mão, copie
+para `data/backups/` com a data e o motivo no nome
+(`ledger.sqlite3.bak-antes-remover-57`).
 
 ---
 
@@ -516,7 +598,8 @@ Aba sem essa coluna é ignorada com um aviso, e não derruba a leitura.
 | `PROCESSO` | sim | O número CNJ a buscar |
 | `TIPO DE COBRANÇA`, `TAREFA` **ou** `TAREFA PARA LANÇAR` | não | Filtro `--tipo-contem`, coluna dos relatórios e, com `--tarefa auto`, a tarefa daquela linha |
 | `STATUS LEGAL ONE` | não | Filtro `--status-planilha` e coluna dos relatórios |
-| `DESCRIÇÃO DA TAREFA`, `TIPO DA TAREFA`, `STATUS DA TAREFA`, `RESPONSÁVEL DA TAREFA` | só com `--tarefa planilha` | A tarefa de cada linha. Fora desse modo são ignoradas |
+| `DESCRIÇÃO DA TAREFA`, `TIPO DA TAREFA`, `STATUS DA TAREFA`, `RESPONSÁVEL DA TAREFA` | só com `--tarefa planilha` (a descrição é obrigatória nesse modo) | A tarefa de cada linha. Fora desse modo são ignoradas |
+| `INÍCIO DA TAREFA`, `CONCLUSÃO DA TAREFA`, `PUBLICAÇÃO DA TAREFA`, `DISPONIBILIZAÇÃO DA TAREFA` | não | As datas de cada linha no modo planilha, por cima de `--data` e das outras flags de data |
 
 **A coluna da cobrança tem três nomes aceitos.** As planilhas antigas trazem
 `TIPO DE COBRANÇA`; a de 2022 e a de 2025 trazem `TAREFA`; a de 2026 traz
@@ -634,6 +717,45 @@ novo já o torna disponível no modo auto, com o texto da coluna
 
 ---
 
+## Scripts de operação
+
+Em `scripts/`, versionados, rodados da raiz do projeto. Nenhum cadastra nada.
+
+**`auditar.py`** — confere no Legal One se os cadastros que o ledger dá como
+feitos existem de verdade, num recorte de horário, e grava um CSV com
+`sim`/`NAO`/`ERRO_CONFERENCIA` por processo. Não muda o ledger. Serve para as
+rodadas de antes da 1.8 (ver
+[O ledger diz cadastrado mas a tarefa não existe](#o-ledger-diz-cadastrado-mas-a-tarefa-não-existe))
+e para qualquer rodada que se queira conferir. Precisa do Chrome de debug livre.
+
+```powershell
+python scripts\auditar.py --desde 2026-09-10T14:00 [--ate 2026-09-11] [--saida "Cadastros\Auditoria.csv"]
+```
+
+**`planilha_da_leva.py`** — a planilha de cadastrados de um recorte de horário,
+no mesmo formato da planilha do dia. É para as levas que não coincidem com um
+dia (uma que atravessa a meia-noite, um dia com duas). Só lê o ledger.
+
+```powershell
+python scripts\planilha_da_leva.py --desde 2026-09-10T14:00 --ate 2026-09-10T18:20 --saida "Cadastros\Cadastrados Quarta Leva dia 10 de setembro.xlsx"
+```
+
+**`rodada_ate_a_meta.ps1`** — solta uma rodada longa e a religa até cadastrar N
+tarefas, pedindo a cada vez só o que falta (`--max-cadastros`). Decide pelo
+código de saída: religa depois de disjuntor (1), conferindo antes se o Chrome e
+o Legal One respondem; encerra na fila vazia (0), no erro de uso (2), na sessão
+expirada (3) e no `Ctrl+C` (130). O Python sai destacado com `Start-Process` —
+rodada longa como tarefa de fundo do terminal morre sem aviso — e o log vai para
+`logs\rodada_<data-hora>.log`. Tudo depois de `--` vai para o `main.py`:
+
+```powershell
+$a = @('-File','scripts\rodada_ate_a_meta.ps1','-Planilha','"Planilhas\Faturamento 2024.xlsx"','-Meta','1000','--','--tarefa','auto')
+Start-Process powershell -ArgumentList $a -WindowStyle Hidden
+Get-Content logs\rodada_*.log -Wait -Tail 20
+```
+
+---
+
 ## Quando algo dá errado
 
 ### O programa não conecta no Chrome (código 1)
@@ -719,27 +841,24 @@ supervisão com linhas que não existem no sistema.
 
 **Desde a 1.8 isso vira `erro`**, com a mensagem no `DETALHE` do
 `relatorio.csv`, e volta com `--retentar`. A exceção é o aviso de data passada
-quando a data veio de `--data`: aí ele é confirmado e a tarefa grava, e o
-detalhe diz `cadastrada (data anterior a hoje confirmada)`.
+quando o dia foi pedido (`--data`, `--fim` ou a coluna da planilha): aí ele é
+confirmado e a tarefa grava, e o detalhe diz
+`cadastrada (data anterior a hoje confirmada)`.
 
 O `ok` gravado **antes** da 1.8 não é revisto sozinho: rodadas antigas ainda
 precisam da auditoria abaixo.
 
-**Como auditar uma rodada.** A conferência é feita com a mesma checagem de
-duplicata que o programa já usa, sobre a planilha do dia:
+**Como auditar uma rodada.** Com o `scripts\auditar.py`, que lê no ledger os
+cadastros de um recorte de horário e confere cada um na grade do processo (ver
+[Scripts de operação](#scripts-de-operação)):
 
-```python
-import legalone, openpyxl
-ws = openpyxl.load_workbook("../data/cadastrados_AAAA-MM-DD.xlsx", read_only=True).active
-a = legalone.AutomadorLegalOne(legalone.conectar())
-a.usar_aba_propria()
-for l in ws.iter_rows(min_row=2, values_only=True):
-    print(l[0], a.tarefa_ja_existe(str(l[1]), l[2]))   # processo, id, tarefa
+```powershell
+python scripts\auditar.py --desde 2026-09-10T14:00 --ate 2026-09-11 --saida "Cadastros\Auditoria rodada 10-09.csv"
 ```
 
-Gasta ~2,5 s por processo (uma planilha de 2.600 leva perto de duas horas) e
-exige o Chrome livre, como a rodada. Dê **duas tentativas** antes de dar um
-processo como ausente: é esse resultado que decide o que sai do ledger.
+Gasta ~2,5 s por processo (uma rodada de 2.600 leva perto de duas horas) e
+exige o Chrome livre, como a rodada. Cada ausente é conferido **duas vezes**
+antes de sair como `NAO`: é esse resultado que decide o que sai do ledger.
 
 O que não existir deve ser **removido** do ledger (`delete from processos where
 cnj = ? and tarefa = ?`), e não marcado como erro — assim volta à fila numa
@@ -748,6 +867,23 @@ refaça os relatórios com `--relatorio` depois.
 
 Medido em 09-10/09/2026: 208 ausentes em 3.003 cadastros (6,9%), distribuídos
 de forma que não se explica por tribunal nem por horário.
+
+### Código 2 com "Tarefa que nao da para cadastrar no Legal One"
+
+A conferência do início da rodada não achou exatamente um tipo ou um
+responsável para o que foi pedido. A mensagem diz o que existe: os caminhos do
+tipo repetido ("escreva o caminho"), os parecidos com o tipo que não existe, os
+usuários que casam com o nome ambíguo. Corrija o `tarefas.toml`, a flag ou a
+coluna e repita — nada foi cadastrado. Responsável que "não é usuário ativo"
+pode ter sido desativado no Legal One.
+
+### Código 2 com "Data que o Legal One nao aceita" ou "Linha(s) sem tarefa completa"
+
+A conferência de antes do Chrome achou linhas que o Legal One recusaria (início
+depois da conclusão, Pendente com conclusão no passado) ou que não dizem a
+tarefa inteira (sem status, sem responsável, status que não existe, data mal
+escrita). A mensagem traz aba, linha e número de cada uma. Corrija a planilha
+ou as flags e repita.
 
 ### `nao_encontrado` alto
 
@@ -787,6 +923,8 @@ mudar de comportamento.
 | `MAX_ERROS_SEGUIDOS` | `3` | Quantos `erro` seguidos param a rodada |
 | `PASSO_PROGRESSO` | `25` | De quantos em quantos processos sai a linha de progresso (em `src/main.py`) |
 | `TIPO_ACEITO` | `"Processo"` | Só cadastra em pasta deste tipo (recurso e incidente repetem o CNJ) |
+| `STATUS_RECUSADOS_NO_PASSADO` | `{"Pendente"}` | Status que o Legal One não aceita com conclusão no passado; conferido antes do Chrome |
+| `DURACAO_PADRAO` | 30 minutos | Duração da tarefa quando só uma das horas é pedida (em `src/datas.py`) |
 
 Aumentar `TIMEOUT_PADRAO` é o primeiro ajuste a tentar se começarem a aparecer
 muitos erros de timeout numa rede lenta.
