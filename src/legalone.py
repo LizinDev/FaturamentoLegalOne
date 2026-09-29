@@ -11,6 +11,7 @@ from selenium.common.exceptions import (
     ElementClickInterceptedException,
     NoSuchWindowException,
     TimeoutException,
+    WebDriverException,
 )
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -116,6 +117,50 @@ def interpretar_busca(linhas: list[dict], cnj: str) -> ResultadoBusca:
         id_legalone=escolhido["id"],
         status=escolhido["status"],
     )
+
+
+# O que a pagina diz depois do Salvar. Ver situacao_pos_salvar.
+SALVOU = "salvou"
+PEDIU_CONFIRMACAO = "pediu_confirmacao"
+RECUSOU = "recusou"
+
+# O formulario devolvido pelo servidor, com aviso ou erro. So chega aqui quem
+# nao foi gravado: o cadastro aceito redireciona para outra pagina.
+CAMINHO_FORMULARIO_DEVOLVIDO = "/processos/tarefas/edit"
+
+# Trecho do aviso de data passada: "A data de 'Inicio' do compromisso ou de
+# 'Conclusao' da tarefa e anterior a data atual. Deseja salvar mesmo assim?"
+TRECHO_AVISO_DATA_PASSADA = "anterior à data atual"
+
+
+def situacao_pos_salvar(url: str, aviso: str, erros: str) -> str | None:
+    """Le a pagina depois do Salvar: SALVOU, PEDIU_CONFIRMACAO, RECUSOU ou None.
+
+    None quer dizer "ainda nao da para afirmar" — o POST nao voltou, ou o
+    formulario voltou e o aviso ainda nao apareceu. Separada do Selenium, como
+    interpretar_busca, porque e aqui que se decide se um cadastro vira 'ok'.
+
+    Ate a 1.8 o sucesso era "saiu de CreateFromProcesso". Mas o servidor devolve
+    o formulario em /processos/tarefas/Edit quando recusa (erro de validacao) ou
+    quando pede confirmacao (data anterior a hoje), e essa URL ja satisfazia a
+    regra: testado em 29/09/2026 na pasta de teste, era esse o "cadastro
+    fantasma" da virada do dia — o aviso ficava na tela sem resposta e o
+    ledger gravava 'ok'. O cadastro aceito vai para outro endereco
+    (/processos/compromissotarefa, que mostra "erro inesperado no servidor" mas
+    com a tarefa gravada).
+    """
+    caminho = urllib.parse.urlparse(url).path.lower().rstrip("/")
+    if "createfromprocesso" in caminho:
+        return None
+    if caminho.endswith(CAMINHO_FORMULARIO_DEVOLVIDO):
+        # O aviso tem prioridade: com ele na tela o formulario ainda pode ser
+        # gravado, entao nao e recusa.
+        if aviso:
+            return PEDIU_CONFIRMACAO
+        if erros:
+            return RECUSOU
+        return None
+    return SALVOU
 
 
 def conectar() -> webdriver.Chrome:
@@ -470,12 +515,76 @@ class AutomadorLegalOne:
             self._esperar_mascara_sumir()
             botao.click()
 
+    # Onde o Legal One poe as mensagens de recusa. O span-error-validation-message
+    # e o do erro de data/status ("O status selecionado nao pode ser
+    # 'Pendente'..."), e ficou de fora ate a 1.8 — a recusa passava por sucesso.
+    SELETOR_ERROS = (".field-validation-error, .validation-summary-errors, "
+                     ".alert-danger, .span-error-validation-message")
+
     def _erros_de_validacao(self) -> str:
+        # So conta mensagem visivel: o formulario pode trazer o span de erro
+        # montado e escondido, e ler texto escondido recusaria um cadastro bom.
         return self.driver.execute_script("""
-        return [...document.querySelectorAll(
-          '.field-validation-error, .validation-summary-errors, .alert-danger')]
+        return [...document.querySelectorAll(arguments[0])]
+          .filter(e => e.getClientRects().length > 0)
           .map(e => e.innerText.trim()).filter(t => t).join(' | ');
+        """, self.SELETOR_ERROS) or ""
+
+    def _aviso_na_tela(self) -> str:
+        """Texto do aviso modal do Legal One (Sim/Nao), ou "" se nao houver.
+
+        E um popup do proprio site, e nao um alert do navegador: o Selenium nao
+        o enxerga como alerta, e so a leitura do DOM o encontra.
+        """
+        return self.driver.execute_script("""
+        const ok = document.getElementById('popup_ok');
+        if (!ok || ok.getClientRects().length === 0) return '';
+        const caixa = document.getElementById('popup_message')
+          || document.getElementById('popup_container') || ok.parentElement;
+        const texto = (caixa.innerText || '').replace(/\\s+/g, ' ').trim();
+        return texto || '(aviso sem texto)';
         """) or ""
+
+    def _responder_aviso(self, sim: bool) -> None:
+        botao = "popup_ok" if sim else "popup_cancel"
+        self.driver.execute_script(
+            "document.getElementById(arguments[0]).click();", botao
+        )
+
+    def _esperar_resposta_do_salvar(self, confirmado: bool = False) -> str:
+        """Espera o Legal One dizer o que fez com o Salvar (ver situacao_pos_salvar).
+
+        confirmado: a espera e a de depois do Sim no aviso. Ai a pagina ainda e
+        o formulario devolvido enquanto o novo POST viaja, entao ficar parado
+        nela e incerteza (pode ter gravado), e nao recusa.
+        """
+        def ler(d):
+            # No meio da navegacao do POST o script pode falhar por um instante
+            # (a pagina velha ja se foi, a nova ainda nao montou). Isso nao e
+            # resposta nenhuma: sem tolerar, um cadastro gravado viraria erro, e
+            # o --retentar o gravaria de novo.
+            try:
+                return situacao_pos_salvar(
+                    d.current_url, self._aviso_na_tela(), self._erros_de_validacao()
+                )
+            except WebDriverException:
+                return None
+
+        try:
+            return self.wait.until(ler)
+        except TimeoutException:
+            pass
+        erros = self._erros_de_validacao()
+        if erros:
+            raise RuntimeError(f"nao salvou: {erros}")
+        if confirmado or "CreateFromProcesso" in self.driver.current_url:
+            # O POST nem voltou: pode ter gravado. Ver SalvarIncerto.
+            raise SalvarIncerto("nao salvou: formulario nao avancou")
+        # O servidor devolveu o formulario, sem aviso nem erro legivel. Nao foi
+        # gravado — e antes da 1.8 isto virava 'ok'.
+        raise RuntimeError(
+            "nao salvou: o Legal One devolveu o formulario sem mensagem legivel"
+        )
 
     def cadastrar_tarefa(self, id_legalone: str, executar: bool,
                          tarefa: "config.Tarefa") -> str:
@@ -517,15 +626,36 @@ class AutomadorLegalOne:
 
         self._clicar_salvar()
 
-        # Sucesso = sai do formulario de criacao. Se continuar nele, a pagina
-        # tem o motivo da recusa — ou o Salvar gravou e so a navegacao travou.
-        try:
-            self.wait.until(lambda d: "CreateFromProcesso" not in d.current_url)
-        except TimeoutException:
-            erros = self._erros_de_validacao()
-            if erros:
-                raise RuntimeError(f"nao salvou: {erros}")
-            raise SalvarIncerto("nao salvou: formulario nao avancou")
+        situacao = self._esperar_resposta_do_salvar()
+        confirmou = False
+        if situacao == PEDIU_CONFIRMACAO:
+            aviso = self._aviso_na_tela()
+            # So confirma o que foi pedido de proposito. Sem --data, uma data
+            # passada so aparece num processo que atravessou a meia-noite: ai o
+            # certo e virar erro e ser refeito com a data do dia, e nao gravar
+            # uma tarefa com a data de ontem.
+            if not (tarefa.confirmar_data_passada
+                    and TRECHO_AVISO_DATA_PASSADA in aviso):
+                self._responder_aviso(sim=False)
+                raise RuntimeError(f"nao salvou: o Legal One pediu confirmacao: {aviso}")
+            self._responder_aviso(sim=True)
+            confirmou = True
+            # Sem esperar o aviso sair, a leitura seguinte o acharia ainda na
+            # tela e tomaria o mesmo aviso por um segundo.
+            with contextlib.suppress(TimeoutException):
+                self.wait.until(lambda d: not self._aviso_na_tela())
+            situacao = self._esperar_resposta_do_salvar(confirmado=True)
+            if situacao == PEDIU_CONFIRMACAO:
+                segundo = self._aviso_na_tela()
+                self._responder_aviso(sim=False)
+                raise RuntimeError(
+                    f"nao salvou: segundo aviso depois de confirmar: {segundo}"
+                )
+
+        if situacao == RECUSOU:
+            raise RuntimeError(f"nao salvou: {self._erros_de_validacao()}")
 
         self._checar_sessao()
+        if confirmou:
+            return "cadastrada (data anterior a hoje confirmada)"
         return "cadastrada"

@@ -108,9 +108,14 @@ class Tarefa:
     # One so compara a data (testado em 29/09/2026).
     hora_inicio: str | None = None  # HH:MM:SS
     hora_fim: str | None = None
+    # Data anterior a hoje faz o Legal One pedir confirmacao ("Deseja salvar
+    # mesmo assim?"). So se responde Sim quando a data foi escolhida de
+    # proposito; a data de hoje que virou ontem durante o cadastro nao conta.
+    confirmar_data_passada: bool = False
 
     @classmethod
-    def do_perfil(cls, perfil: PerfilTarefa, data: str) -> "Tarefa":
+    def do_perfil(cls, perfil: PerfilTarefa, data: str,
+                  confirmar_data_passada: bool = False) -> "Tarefa":
         """A tarefa de um perfil numa data, com inicio e fim no mesmo dia."""
         return cls(
             descricao=perfil.descricao,
@@ -120,6 +125,7 @@ class Tarefa:
             responsavel_esperado=perfil.responsavel_esperado,
             data_inicio=data,
             data_fim=data,
+            confirmar_data_passada=confirmar_data_passada,
         )
 
     @property
@@ -179,6 +185,13 @@ STATUS_VALIDOS = {
     "Iniciado": "4",
     "Recusado": "5",
 }
+
+# Status que o Legal One nao aceita com data de conclusao anterior a hoje: ele
+# devolve "O status selecionado nao pode ser 'Pendente' quando a data de
+# conclusao for anterior a data atual" (testado em 29/09/2026). Cumprido e
+# aceito depois de confirmar o aviso. Os demais status nao foram testados; se
+# forem recusados, a recusa aparece como erro com a mensagem do Legal One.
+STATUS_RECUSADOS_NO_PASSADO = {"Pendente"}
 
 # --- Planilha ----------------------------------------------------------------
 

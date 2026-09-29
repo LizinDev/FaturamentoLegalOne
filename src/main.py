@@ -346,7 +346,13 @@ class Rodada:
         uma rodada que atravessa a meia-noite tem que mandar a data do dia novo.
         """
         data = self.data_fixa or datetime.date.today().strftime(FORMATO_DATA)
-        return config.Tarefa.do_perfil(self._perfil_de(proc), data)
+        # Com --data, a data foi escolhida: se for passada (ou virar passada na
+        # meia-noite), o aviso do Legal One e confirmado. Sem --data, o aviso so
+        # aparece num processo pego pela virada, e ai ele vira erro.
+        return config.Tarefa.do_perfil(
+            self._perfil_de(proc), data,
+            confirmar_data_passada=self.data_fixa is not None,
+        )
 
     def _um_processo(self, proc: planilha.Processo, i: int, total: int) -> bool:
         """Trata um processo. Devolve False quando a rodada tem que parar."""
@@ -620,6 +626,32 @@ def _data_da_tarefa(args: argparse.Namespace) -> str:
     return data
 
 
+def _conferir_data_passada(args: argparse.Namespace,
+                           perfil: config.PerfilTarefa) -> None:
+    """Recusa, antes de abrir o Chrome, a data passada que o Legal One barra.
+
+    Sem isto cada processo da fila viraria erro com a mesma mensagem, ate o
+    disjuntor parar a rodada. Data passada com status aceito so gera um aviso:
+    o Legal One pede confirmacao, e a rodada confirma (ver Tarefa).
+    """
+    if not args.data:
+        return
+    data = datetime.datetime.strptime(args.data, FORMATO_DATA).date()
+    if data >= datetime.date.today():
+        return
+    perfis = (config.PERFIS_POR_DESCRICAO.values()
+              if perfil.nome == config.NOME_AUTO else [perfil])
+    recusados = sorted({p.status for p in perfis}
+                       & config.STATUS_RECUSADOS_NO_PASSADO)
+    if recusados:
+        raise ErroDeUso(
+            f"--data {args.data} e anterior a hoje, e o Legal One nao aceita "
+            f"tarefa {', '.join(recusados)} com data passada."
+        )
+    logger.warning("--data %s e anterior a hoje: o Legal One pede confirmacao "
+                   "e ela sera dada em cada cadastro.", args.data)
+
+
 def _montar_fila(args: argparse.Namespace, registro: ledger_mod.Ledger,
                  perfil: config.PerfilTarefa, processos: list[planilha.Processo]
                  ) -> tuple[list[planilha.Processo], list[planilha.Processo],
@@ -717,6 +749,7 @@ def _modo_rodada(args: argparse.Namespace) -> int:
     perfil = config.PERFIL_AUTO if auto else config.PERFIS[args.tarefa]
     _conferir_planilha(args, perfil)
     data_tarefa = _data_da_tarefa(args)
+    _conferir_data_passada(args, perfil)
 
     try:
         processos = planilha.ler(

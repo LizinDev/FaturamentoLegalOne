@@ -727,3 +727,17 @@ def test_tarefa_com_hora_junta_data_e_hora_no_ledger():
                                    hora_fim="09:30:00")
     assert (com_hora.inicio, com_hora.fim) == ("15/10/2026 09:00:00",
                                                "15/10/2026 09:30:00")
+
+
+def test_so_a_data_escolhida_confirma_o_aviso_de_data_passada(registro, perfil):
+    # Sem --data, o aviso de data passada so aparece num processo pego pela
+    # meia-noite: ele tem que virar erro, e nao gravar a tarefa com a data de
+    # ontem. Com --data, a data passada e o que se pediu.
+    sem_data = AutomadorFalso({CNJ: achou()})
+    rodada(sem_data, registro, perfil, executar=True).executar_fila([processo()])
+    com_data = AutomadorFalso({CNJ: achou()})
+    rodada(com_data, registro, perfil, executar=True,
+           data_fixa="01/09/2026").executar_fila([processo()])
+
+    assert sem_data.enviadas[0].confirmar_data_passada is False
+    assert com_data.enviadas[0].confirmar_data_passada is True

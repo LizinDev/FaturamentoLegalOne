@@ -261,6 +261,14 @@ antes da virada levam a data de ontem e as de depois levam a de hoje, na mesma
 execução. Use `--data` quando precisar que a rodada inteira registre uma data
 fixa.
 
+Data anterior a hoje é aceita com status Cumprido: o Legal One pede
+confirmação (*Deseja salvar mesmo assim?*) e a rodada confirma em cada cadastro,
+avisando no início do log. Com um perfil Pendente, a rodada é recusada com
+código 2 antes de abrir o Chrome — o Legal One não aceita Pendente com data
+passada. Sem `--data`, o aviso nunca é confirmado: ele só aparece num processo
+pego pela meia-noite, que vira `erro` e é refeito pelo `--retentar` com a data
+do dia.
+
 **`--forcar-planilha`**
 
 Desliga a trava que confere se a planilha combina com o `--tarefa` escolhido.
@@ -582,31 +590,34 @@ Depois de resolver, `--retentar` recoloca os erros na fila.
 
 ### O ledger diz cadastrado mas a tarefa não existe
 
-O modo de falha mais caro, porque não aparece em lugar nenhum enquanto roda. O
-Legal One recusa o cadastro por validação e **não mostra erro**: apenas sai do
-formulário de criação, indo para `/processos/tarefas/Edit` com a mensagem na
-tela. O programa reconhece sucesso por ter saído de `CreateFromProcesso`, então
-grava `ok`. O log diz `cadastrada`, o placar não acusa nada, e a planilha do dia
-vai para a supervisão com linhas que não existem no sistema.
-
-Duas causas confirmadas em produção:
+Até a versão 1.7, o modo de falha mais caro, porque não aparecia em lugar nenhum
+enquanto rodava. Quando o Legal One não grava, ele devolve o formulário em
+`/processos/tarefas/Edit` com a mensagem na tela; o programa reconhecia sucesso
+por ter saído de `CreateFromProcesso`, então gravava `ok`. O log dizia
+`cadastrada`, o placar não acusava nada, e a planilha do dia ia para a
+supervisão com linhas que não existem no sistema.
 
 | Mensagem na tela | Causa |
 | --- | --- |
-| (nenhuma; formulário recusa a data) | Data de início anterior ao dia corrente — acontece quando a rodada atravessa a meia-noite com `--data` fixa |
+| Aviso *"... é anterior à data atual. Deseja salvar mesmo assim?"* | Data anterior a hoje — a rodada atravessou a meia-noite |
+| `O status selecionado não pode ser 'Pendente' quando a data de conclusão for anterior à data atual` | Pendente com data passada |
 | `O conteúdo informado no campo 'Nome' já existe` | O responsável já consta como envolvido da tarefa, e é preenchido de novo |
 
-A primeira já tem conserto: sem `--data`, a data é recalculada a cada cadastro.
-A segunda continua aberta.
+**Desde a 1.8 isso vira `erro`**, com a mensagem no `DETALHE` do
+`relatorio.csv`, e volta com `--retentar`. A exceção é o aviso de data passada
+quando a data veio de `--data`: aí ele é confirmado e a tarefa grava, e o
+detalhe diz `cadastrada (data anterior a hoje confirmada)`.
+
+O `ok` gravado **antes** da 1.8 não é revisto sozinho: rodadas antigas ainda
+precisam da auditoria abaixo.
 
 **Como auditar uma rodada.** A conferência é feita com a mesma checagem de
 duplicata que o programa já usa, sobre a planilha do dia:
 
 ```python
-import legalone, config, openpyxl
+import legalone, openpyxl
 ws = openpyxl.load_workbook("../data/cadastrados_AAAA-MM-DD.xlsx", read_only=True).active
-a = legalone.AutomadorLegalOne(legalone.conectar(), "DD/MM/AAAA",
-                               config.PERFIS["defesa-faturada"])
+a = legalone.AutomadorLegalOne(legalone.conectar())
 a.usar_aba_propria()
 for l in ws.iter_rows(min_row=2, values_only=True):
     print(l[0], a.tarefa_ja_existe(str(l[1]), l[2]))   # processo, id, tarefa

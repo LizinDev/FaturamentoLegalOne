@@ -184,20 +184,34 @@ seguidos o programa para, descarta esses registros suspeitos do ledger e avisa.
 sucesso. O descarte só alcança registros pendentes: `ok`, `recadastrada` e
 `ja_existia` são trabalho confirmado no Legal One e nunca são apagados.
 
-**Recusa silenciosa no Salvar** — o caso que *nenhuma* trava alcança, e por
-isso o mais caro. O Legal One pode recusar o cadastro por validação (data de
-início anterior ao dia corrente, responsável que já consta como envolvido) sem
-mostrar erro: ele apenas sai do formulário de criação. Como o sucesso é
-reconhecido justamente por sair de `CreateFromProcesso`, a recusa é lida como
-cadastro feito, o processo entra no ledger como `ok` e o relatório o lista. A
-tarefa nunca existiu.
+**Formulário devolvido no Salvar** — até a 1.7 era o caso que *nenhuma* trava
+alcançava. Quando o Legal One não grava, ele devolve o formulário em
+`/processos/tarefas/Edit`, com uma de três coisas na tela: um **erro de
+validação** (status Pendente com data passada; responsável que já consta como
+envolvido — `O conteúdo informado no campo 'Nome' já existe`), um **aviso** que
+pede confirmação (data anterior a hoje: *Deseja salvar mesmo assim?*), ou nada
+legível. O programa reconhecia sucesso por ter saído de `CreateFromProcesso`, e
+`/Edit` já satisfazia isso: o processo entrava no ledger como `ok` e a tarefa
+nunca existia. Medido em 09-10/09/2026 na `Faturamento 2024.xlsx`: de 3.003
+cadastros dados como feitos, **208 não existiam** (6,9%).
 
-Medido em 09-10/09/2026 na `Faturamento 2024.xlsx`: de 3.003 cadastros dados
-como feitos, **208 não existiam** (6,9%) — conferidos um a um no Legal One. Não
-é erro, não é sessão expirada, não é "não encontrado": o log mostra `cadastrada`
-no ritmo normal e o placar não acusa nada. Enquanto o salvamento não for
-confirmado pela grade (ou pela ausência de `.validation-summary-errors`) em vez
-da URL, **toda rodada precisa ser auditada depois** — ver
+Desde a 1.8 o sucesso é sair do formulário **para outra página** — o cadastro
+aceito vai para `/processos/compromissotarefa`, que mostra "erro inesperado no
+servidor" mas com a tarefa gravada. No formulário devolvido:
+
+- erro de validação vira `erro`, com a mensagem do Legal One no `DETALHE`;
+- o aviso de data passada só é confirmado quando a data veio de `--data`. Sem
+  `--data`, ele só aparece num processo pego pela meia-noite, e aí vira `erro`
+  para ser refeito com a data do dia, em vez de gravar a tarefa com a de ontem;
+- formulário devolvido sem mensagem legível vira `erro` — nunca `ok`.
+
+As regras foram levantadas em 29/09/2026 na pasta de teste (`Proc - 0108067`):
+Cumprido com data passada grava depois de confirmar; Pendente com data passada é
+recusado; hora já passada no próprio dia é aceita sem aviso (só a data conta).
+`--data` passada com um perfil Pendente é recusada antes de abrir o Chrome
+(`STATUS_RECUSADOS_NO_PASSADO`, em `src/config.py`).
+
+A auditoria das rodadas feitas até a 1.7 continua valendo — ver
 [Manual](MANUAL.md#o-ledger-diz-cadastrado-mas-a-tarefa-não-existe).
 
 **`Ctrl+C`** — encerra limpo, exporta os relatórios e mantém o progresso.

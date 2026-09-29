@@ -97,6 +97,48 @@ def test_data_padrao_e_hoje():
     assert main._data_da_tarefa(args) == datetime.date.today().strftime("%d/%m/%Y")
 
 
+def _dia(delta: int) -> str:
+    return (datetime.date.today() + datetime.timedelta(days=delta)).strftime("%d/%m/%Y")
+
+
+def test_data_passada_com_status_que_o_legal_one_barra_e_recusada():
+    # Pendente com data passada e recusado pelo Legal One em cada processo; a
+    # rodada inteira viraria erro ate o disjuntor.
+    pendente = config.PerfilTarefa("pendente-teste", "TAREFA X", status="Pendente")
+    args = main.argumentos(["--planilha", "x.xlsx", "--data", _dia(-1)])
+
+    with pytest.raises(main.ErroDeUso, match="Pendente"):
+        main._conferir_data_passada(args, pendente)
+
+
+def test_data_passada_com_cumprido_so_avisa(caplog):
+    args = main.argumentos(["--planilha", "x.xlsx", "--data", _dia(-7)])
+
+    main._conferir_data_passada(args, config.PERFIS["defesa-faturada"])
+
+    assert "anterior a hoje" in caplog.text
+
+
+@pytest.mark.parametrize("argv", [[], ["--data", _dia(0)], ["--data", _dia(3)]])
+def test_hoje_ou_futuro_nao_passa_pela_conferencia(argv, caplog):
+    pendente = config.PerfilTarefa("pendente-teste", "TAREFA X", status="Pendente")
+    args = main.argumentos(["--planilha", "x.xlsx", *argv])
+
+    main._conferir_data_passada(args, pendente)
+
+    assert "anterior a hoje" not in caplog.text
+
+
+def test_data_passada_no_modo_auto_confere_todos_os_perfis(monkeypatch):
+    pendente = config.PerfilTarefa("pendente-teste", "TAREFA X", status="Pendente")
+    monkeypatch.setitem(config.PERFIS_POR_DESCRICAO, pendente.descricao, pendente)
+    args = main.argumentos(["--planilha", "x.xlsx", "--tarefa", "auto",
+                            "--data", _dia(-1)])
+
+    with pytest.raises(main.ErroDeUso, match="Pendente"):
+        main._conferir_data_passada(args, config.PERFIL_AUTO)
+
+
 def test_trava_de_planilha_por_perfil():
     perfil = config.PerfilTarefa("defesa-teste", "DEFESA FATURADA",
                                  dica_arquivo="defesa")
