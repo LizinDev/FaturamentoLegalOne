@@ -13,12 +13,14 @@ Codigos de saida:
     130  interrompida com Ctrl+C
 """
 import argparse
+import dataclasses
 import datetime
 import logging
 import re
 import sys
 import time
 
+import catalogo
 import config
 import ledger as ledger_mod
 import legalone
@@ -229,12 +231,17 @@ class Rodada:
                  so_buscar: bool = False, rapido: bool = False,
                  pular_existentes: bool = False,
                  max_cadastros: int | None = None,
-                 data_fixa: str | None = None):
+                 data_fixa: str | None = None,
+                 resolvidos: dict[str, config.PerfilTarefa] | None = None):
         self.automador = automador
         self.registro = registro
         self.perfil = perfil
         # --data. Sem ela, a data e a de hoje no instante de cada cadastro.
         self.data_fixa = data_fixa
+        # Descricao -> perfil com tipo e responsavel conferidos no Legal One
+        # (ver _resolver_perfis). Perfil fora daqui vai como esta, e o
+        # formulario so confere o tipo que ja vem nele.
+        self.resolvidos = resolvidos or {}
         self.executar = executar
         self.so_buscar = so_buscar
         self.rapido = rapido
@@ -337,7 +344,8 @@ class Rodada:
 
     def _perfil_de(self, proc: planilha.Processo) -> config.PerfilTarefa:
         """Perfil da tarefa deste processo — o da linha, ou o padrao da rodada."""
-        return config.PERFIS_POR_DESCRICAO.get(proc.tarefa, self.perfil)
+        perfil = config.PERFIS_POR_DESCRICAO.get(proc.tarefa, self.perfil)
+        return self.resolvidos.get(perfil.descricao, perfil)
 
     def _tarefa_de(self, proc: planilha.Processo) -> config.Tarefa:
         """A tarefa a enviar para este processo, com a data resolvida agora.
@@ -513,7 +521,7 @@ class Rodada:
             cnj_original=proc.cnj_original,
             tipo=tarefa.tipo if tarefa else "",
             status=tarefa.status if tarefa else "",
-            responsavel=tarefa.responsavel_esperado if tarefa else "",
+            responsavel=tarefa.responsavel if tarefa else "",
             data_inicio=tarefa.inicio if tarefa else "",
             data_fim=tarefa.fim if tarefa else "",
         )
@@ -652,6 +660,48 @@ def _conferir_data_passada(args: argparse.Namespace,
                    "e ela sera dada em cada cadastro.", args.data)
 
 
+def _perfis_da_rodada(perfil: config.PerfilTarefa) -> list[config.PerfilTarefa]:
+    """Perfis que a rodada pode cadastrar — no modo auto, todos eles."""
+    if perfil.nome == config.NOME_AUTO:
+        return list(config.PERFIS_POR_DESCRICAO.values())
+    return [perfil]
+
+
+def _resolver_perfis(automador, perfis: list[config.PerfilTarefa]
+                     ) -> dict[str, config.PerfilTarefa]:
+    """Confere no Legal One o tipo e o responsavel de cada perfil da rodada.
+
+    Roda uma vez, antes do primeiro cadastro: um tipo que nao existe ou um
+    responsavel ambiguo viraria o mesmo erro em cada processo da fila, e um
+    casamento errado criaria centenas de tarefas no lugar errado. Devolve os
+    perfis reescritos como o Legal One escreve tipo e nome, e com o id do tipo.
+    Qualquer problema junta todos os perfis numa mensagem so e vira ErroDeUso.
+    """
+    tipos = automador.listar_tipos()
+    usuarios: dict[str, list[str]] = {}
+    resolvidos: dict[str, config.PerfilTarefa] = {}
+    problemas: list[str] = []
+    for perfil in perfis:
+        try:
+            tipo = catalogo.resolver_tipo(perfil.tipo, tipos)
+            if perfil.responsavel not in usuarios:
+                usuarios[perfil.responsavel] = automador.buscar_usuarios(
+                    perfil.responsavel)
+            nome = catalogo.resolver_usuario(perfil.responsavel,
+                                             usuarios[perfil.responsavel])
+        except catalogo.NaoResolvido as e:
+            problemas.append(f"{perfil.descricao}: {e}")
+            continue
+        resolvidos[perfil.descricao] = dataclasses.replace(
+            perfil, tipo=tipo.caminho, tipo_id=tipo.id, responsavel=nome)
+        logger.info("Conferido:   %r -> tipo %r (%s), responsavel %r",
+                    perfil.descricao, tipo.caminho, tipo.id, nome)
+    if problemas:
+        raise ErroDeUso("Tarefa que nao da para cadastrar no Legal One:\n  "
+                        + "\n  ".join(problemas))
+    return resolvidos
+
+
 def _montar_fila(args: argparse.Namespace, registro: ledger_mod.Ledger,
                  perfil: config.PerfilTarefa, processos: list[planilha.Processo]
                  ) -> tuple[list[planilha.Processo], list[planilha.Processo],
@@ -702,7 +752,7 @@ def _log_cabecalho(args: argparse.Namespace, perfil: config.PerfilTarefa,
     else:
         logger.info("Tarefa:      %r / tipo %r / status %r",
                     perfil.descricao, perfil.tipo, perfil.status)
-        logger.info("Responsavel: %s", perfil.responsavel_esperado)
+        logger.info("Responsavel: %s", perfil.responsavel)
     logger.info("Data:        %s", data_tarefa)
     logger.info("Planilha:    %s", args.planilha)
     logger.info("             %d processo(s) unico(s)", len(processos))
@@ -783,6 +833,23 @@ def _modo_rodada(args: argparse.Namespace) -> int:
         automador = legalone.AutomadorLegalOne(driver)
         automador.usar_aba_propria()
 
+        # --so-buscar nao abre formulario: nao ha tipo nem responsavel a conferir.
+        resolvidos: dict[str, config.PerfilTarefa] = {}
+        if not args.so_buscar:
+            try:
+                resolvidos = _resolver_perfis(automador, _perfis_da_rodada(perfil))
+            except legalone.SessaoExpirada as e:
+                logger.error("SESSAO EXPIRADA: %s", e)
+                return SAIDA_SESSAO
+            except ErroDeUso:
+                raise
+            except Exception as e:
+                # Sem a lista do Legal One nao da para conferir nada; seguir sem
+                # a checagem seria justamente o que ela existe para evitar.
+                logger.error("Nao consegui conferir tipo e responsavel no Legal "
+                             "One: %s: %s", type(e).__name__, e)
+                return SAIDA_ABORTADA
+
         rodada = Rodada(
             automador, registro, perfil,
             executar=args.executar,
@@ -791,6 +858,7 @@ def _modo_rodada(args: argparse.Namespace) -> int:
             pular_existentes=args.pular_existentes,
             max_cadastros=args.max_cadastros,
             data_fixa=args.data,
+            resolvidos=resolvidos,
         )
         try:
             rodada.executar_fila(fila)

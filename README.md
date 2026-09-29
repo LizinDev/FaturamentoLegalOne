@@ -31,6 +31,17 @@ Os perfis ficam em `PERFIS`, em `src/config.py`. São nomeados em vez de texto
 livre na linha de comando porque parear a planilha de uma tarefa com a descrição
 da outra criaria centenas de tarefas indevidas.
 
+Tipo e responsável de um perfil podem ser quaisquer que existam no Legal One —
+o tipo pelo caminho na árvore (`"Diversos / Contato Telefônico"`), o responsável
+pelo nome de um usuário ativo. Eles são conferidos contra o próprio Legal One
+**antes do primeiro cadastro** (`src/catalogo.py`): o que não casa com
+exatamente uma opção para a rodada com código 2 e a lista do que existe, em vez
+de virar erro em cada processo — ou, pior, de cair num tipo parecido. A árvore
+tem nomes repetidos sob pais diferentes ("Audiência" aparece em mais de dez
+lugares) e nomes que já contêm barra ("Agravo em REsp / Rext"), por isso o
+casamento é sempre pelo caminho inteiro. Detalhes no
+[Manual](MANUAL.md#perfis-de-tarefa).
+
 Pela mesma razão cada perfil exige um trecho no nome do arquivo (`dica_arquivo`):
 se você mandar a planilha de defesas com `--tarefa faturamento-final`, a rodada
 é abortada antes de começar. Quando o par estiver certo mas o arquivo não seguir

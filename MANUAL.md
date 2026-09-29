@@ -400,7 +400,7 @@ Combinações inofensivas, que só rendem um aviso e seguem:
 | --- | --- |
 | `0` | Terminou a fila (inclusive "nada a fazer" e `--max-cadastros` atingido) |
 | `1` | Abortou: não conectou ao Chrome ou disjuntor |
-| `2` | Erro de uso: flag faltando, combinação inválida, planilha × tarefa incompatível, data ou planilha inválida, aba inexistente |
+| `2` | Erro de uso: flag faltando, combinação inválida, planilha × tarefa incompatível, data ou planilha inválida, aba inexistente, tipo ou responsável que não casa com o Legal One |
 | `3` | Sessão expirada: alguém precisa fazer login antes de repetir |
 | `130` | `Ctrl+C` |
 
@@ -507,6 +507,47 @@ PERFIS = {
     ]
 }
 ```
+
+Os campos de um perfil:
+
+| Campo | Padrão | Como escrever |
+| --- | --- | --- |
+| `descricao` | — | O texto gravado no campo Descrição; identifica a tarefa na checagem de duplicata e no ledger |
+| `tipo` | `Diversos` | O caminho na árvore de tipos do Legal One: `"Diversos"` para um tipo, `"Diversos / Contato Telefônico"` para um subtipo. `>` também serve de separador. O nome sozinho (`"Contato Telefônico"`) vale enquanto for único na árvore |
+| `status` | `Cumprido` | Um dos seis do Legal One: Pendente, Cumprido, Não cumprido, Cancelado, Iniciado, Recusado |
+| `responsavel` | `Heloiza Helena de Araujo` | Um usuário **ativo** do Legal One. Acento e maiúsculas não importam, e basta parte do nome enquanto só um usuário casar |
+| `dica_arquivo` | vazio | Ver abaixo |
+
+**O tipo e o responsável são conferidos no Legal One antes do primeiro
+cadastro.** Logo depois de conectar no Chrome, a rodada busca a árvore de tipos
+e os usuários e casa cada perfil da rodada (no modo auto, todos). O log mostra o
+resultado:
+
+```
+Conferido:   'DEFESA FATURADA' -> tipo 'Diversos' (tipo_4), responsavel 'Heloiza Helena de Araujo'
+```
+
+Se um tipo não existe, se o nome do tipo aparece sob mais de um pai
+("Audiência" existe em mais de dez lugares) ou se o responsável casa com mais
+de um usuário, a rodada termina com **código 2** sem cadastrar nada, listando o
+que existe:
+
+```
+Tarefa que nao da para cadastrar no Legal One:
+  TAREFA X: tipo 'Prazos / Apelacao' nao existe no Legal One. Parecidos: '[Cível] Prazos / Apelação'; ...
+  TAREFA Y: responsavel 'Ana' casa com mais de um usuario; escreva o nome completo: 'Ana Clara Stroparo'; ...
+```
+
+Nunca se escolhe um "mais parecido": errar o tipo ou a pessoa criaria centenas
+de tarefas no lugar errado. `--so-buscar` não passa por essa conferência, porque
+não abre formulário.
+
+No formulário, o tipo é escolhido **antes** das datas. Subtipos com contagem de
+prazo preenchem sozinhos Data de publicação e Prazo e podem recalcular início e
+fim; por isso as datas pedidas são escritas depois, e conferidas de novo logo
+antes do Salvar — se o Legal One tiver trocado alguma, o processo vira `erro`
+em vez de gravar a tarefa com a data errada. "Diversos", que já é o padrão do
+formulário, não é reescolhido.
 
 `dica_arquivo` é o trecho que precisa aparecer no caminho da planilha — é a
 trava contra parear a planilha de uma tarefa com o perfil da outra. Se os

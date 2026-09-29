@@ -8,6 +8,7 @@ import logging
 
 import pytest
 
+import catalogo
 import config
 import ledger as ledger_mod
 import legalone
@@ -30,6 +31,25 @@ def processo(cnj=CNJ, formato_ok=True, origem="2026!L2", cnj_original=None,
 
 def achou(id_legalone="111", status="Ativo"):
     return legalone.ResultadoBusca(True, id_legalone=id_legalone, status=status)
+
+
+# Um pedaco da arvore de tipos do Legal One, com os casos que importam: o tipo
+# padrao, um subtipo, um nome com barra e um nome repetido sob dois pais.
+ARVORE = catalogo.tipos_da_arvore([
+    {"Id": "tipo_4", "Value": "Diversos", "ParentId": None, "Path": "Diversos"},
+    {"Id": "subtipo_9", "Value": "Contato Telefônico", "ParentId": "tipo_4",
+     "Path": "Diversos / Contato Telefônico"},
+    {"Id": "tipo_43", "Value": "[Cível] Prazos", "ParentId": None,
+     "Path": "[Cível] Prazos"},
+    {"Id": "subtipo_1287", "Value": "Agravo em REsp / Rext", "ParentId": "tipo_43",
+     "Path": "[Cível] Prazos / Agravo em REsp / Rext"},
+    {"Id": "tipo_7", "Value": "Audiência", "ParentId": None, "Path": "Audiência"},
+    {"Id": "subtipo_50", "Value": "Audiência", "ParentId": "tipo_43",
+     "Path": "[Cível] Prazos / Audiência"},
+])
+
+USUARIOS = ["Heloiza Helena de Araujo", "Ana Clara Stroparo",
+            "Ana Luiza Saitone Costa"]
 
 
 class AutomadorFalso:
@@ -57,6 +77,14 @@ class AutomadorFalso:
 
     def aba_viva(self):
         return not self.aba_sumiu
+
+    def listar_tipos(self):
+        return ARVORE
+
+    def buscar_usuarios(self, termo):
+        # Como a busca do Legal One: trecho do nome, sem acento nem caixa.
+        alvo = catalogo.normalizar(termo)
+        return [n for n in USUARIOS if alvo in catalogo.normalizar(n)]
 
     def usar_aba_propria(self):
         self.abas_criadas += 1
@@ -689,7 +717,7 @@ def test_ledger_guarda_a_tarefa_que_foi_enviada(registro, perfil):
         "SELECT tipo, status, responsavel, data_inicio, data_fim FROM processos "
         "WHERE cnj = ?", (CNJ,)
     ).fetchone()
-    assert linha == (perfil.tipo, perfil.status, perfil.responsavel_esperado,
+    assert linha == (perfil.tipo, perfil.status, perfil.responsavel,
                      "15/10/2026", "15/10/2026")
 
 

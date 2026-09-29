@@ -1,6 +1,7 @@
 """CLI, montagem da fila e exportacoes finais."""
 import argparse
 import csv
+import dataclasses
 import datetime
 
 import pytest
@@ -624,3 +625,80 @@ def test_simulacao_nao_apaga_a_lista_das_rodadas_de_verdade(
     main.main(["--planilha", str(arq), "--limite", "1"])
 
     assert (dados_tmp / "nao_encontrados.csv").read_bytes() == antes
+
+
+# --- conferencia de tipo e responsavel no inicio da rodada -------------------
+
+def test_resolver_perfis_reescreve_como_o_legal_one_escreve():
+    pedido = config.PerfilTarefa("teste", "TAREFA X",
+                                 tipo="diversos > contato telefonico",
+                                 responsavel="heloiza")
+
+    resolvidos = main._resolver_perfis(AutomadorFalso(), [pedido])
+
+    perfil = resolvidos["TAREFA X"]
+    assert (perfil.tipo, perfil.tipo_id, perfil.responsavel) == (
+        "Diversos / Contato Telefônico", "subtipo_9", "Heloiza Helena de Araujo")
+
+
+def test_resolver_perfis_junta_todos_os_problemas_numa_mensagem():
+    ruins = [
+        config.PerfilTarefa("a", "TAREFA A", tipo="Inexistente"),
+        config.PerfilTarefa("b", "TAREFA B", responsavel="Ana"),
+    ]
+
+    with pytest.raises(main.ErroDeUso) as erro:
+        main._resolver_perfis(AutomadorFalso(), ruins)
+    assert "TAREFA A" in str(erro.value) and "TAREFA B" in str(erro.value)
+
+
+def test_perfis_de_verdade_passam_pela_conferencia():
+    # Os perfis de producao tem que resolver sem ajuste, e no tipo que o
+    # formulario ja traz: e o que garante que faturamento e defesa continuam
+    # sendo cadastrados exatamente como antes.
+    resolvidos = main._resolver_perfis(
+        AutomadorFalso(), list(config.PERFIS.values()))
+
+    for perfil in resolvidos.values():
+        assert (perfil.tipo_id, perfil.responsavel) == (
+            "tipo_4", "Heloiza Helena de Araujo")
+
+
+def test_rodada_envia_a_tarefa_conferida(dados_tmp, monkeypatch, tmp_path):
+    arq = _planilha_real(tmp_path)
+    automador = AutomadorFalso({ACHADO: achou("111")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+
+    main.main(["--planilha", str(arq), "--executar", "--processo", ACHADO])
+
+    # O tipo_id e o que faz o formulario escolher (ou manter) o tipo; sem ele
+    # o automador so confere o que ja vem na tela.
+    assert automador.enviadas[0].tipo_id == "tipo_4"
+
+
+def test_tipo_que_nao_existe_para_antes_do_primeiro_cadastro(
+    dados_tmp, monkeypatch, tmp_path
+):
+    arq = _planilha_real(tmp_path)
+    automador = AutomadorFalso({ACHADO: achou("111")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+    monkeypatch.setitem(config.PERFIS, config.PERFIL_PADRAO, dataclasses.replace(
+        config.PERFIS[config.PERFIL_PADRAO], tipo="Tipo Que Nao Existe"))
+
+    assert main.main(["--planilha", str(arq), "--executar"]) == main.SAIDA_USO
+    assert automador.buscados == [] and automador.enviadas == []
+
+
+def test_so_buscar_nao_depende_da_conferencia(dados_tmp, monkeypatch, tmp_path):
+    # O pre-voo nao abre formulario; um tipo errado no perfil nao o impede.
+    arq = _planilha_real(tmp_path)
+    automador = AutomadorFalso({ACHADO: achou("111")})
+    monkeypatch.setattr(main.legalone, "conectar", lambda: object())
+    monkeypatch.setattr(main.legalone, "AutomadorLegalOne", lambda *a: automador)
+    monkeypatch.setitem(config.PERFIS, config.PERFIL_PADRAO, dataclasses.replace(
+        config.PERFIS[config.PERFIL_PADRAO], tipo="Tipo Que Nao Existe"))
+
+    assert main.main(["--planilha", str(arq), "--so-buscar"]) == main.SAIDA_OK
+    assert ACHADO in automador.buscados

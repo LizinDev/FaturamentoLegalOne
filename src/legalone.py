@@ -1,6 +1,7 @@
 """Automacao do Legal One: busca de processo e cadastro da tarefa."""
 import contextlib
 import dataclasses
+import json
 import logging
 import os
 import time
@@ -19,6 +20,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+import catalogo
 import config
 
 logger = logging.getLogger(__name__)
@@ -411,8 +413,13 @@ class AutomadorLegalOne:
             and d.find_element(By.ID, "StatusId").get_attribute("value") == esperado
         ))
 
-    def _preencher_responsavel(self, busca: str, esperado: str) -> None:
-        """Troca o envolvido padrao (o usuario logado) pelo responsavel da tarefa."""
+    def _preencher_responsavel(self, nome: str) -> None:
+        """Troca o envolvido padrao (o usuario logado) pelo responsavel da tarefa.
+
+        nome e o nome completo, como o Legal One o escreve (a checagem do inicio
+        da rodada ja o resolveu). Digita-lo inteiro deixa um resultado so na
+        lista, que mostra no maximo 10.
+        """
         campo = self.wait.until(EC.visibility_of_element_located((
             By.CSS_SELECTOR, "input[id*='__EnvolvidoText']"
         )))
@@ -421,21 +428,160 @@ class AutomadorLegalOne:
         )
         campo.clear()
         self.wait.until(lambda d: not campo.get_attribute("value"))
-        campo.send_keys(busca)
+        campo.send_keys(nome)
         # Debounce do lookup do NovaJus: a busca so dispara depois da pausa e
         # nao ha estado no DOM para observar antes do ENTER.
         time.sleep(config.DEBOUNCE_DELAY)
         campo.send_keys(Keys.ENTER)
 
-        linha = self.wait.until(EC.element_to_be_clickable((
-            By.XPATH,
-            f"//td[@data-val-field='ContatoNome' and normalize-space()='{esperado}']",
-        )))
-        linha.click()
+        # A linha e achada comparando o texto em Python, e nao montando um
+        # XPath com o nome: um apostrofo no nome quebraria a expressao.
+        def linha_do_nome(d):
+            for td in d.find_elements(
+                By.CSS_SELECTOR, "td[data-val-field='ContatoNome']"
+            ):
+                if td.is_displayed() and " ".join(td.text.split()) == nome:
+                    return td
+            return False
+
+        self.wait.until(linha_do_nome).click()
 
         self.wait.until(lambda d: d.find_element(
             By.CSS_SELECTOR, "input[id*='__EnvolvidoText']"
-        ).get_attribute("value") == esperado)
+        ).get_attribute("value") == nome)
+
+    def _esperar_ajax(self) -> None:
+        """Espera as requisicoes do jQuery da pagina terminarem.
+
+        Escolher um subtipo dispara a sugestao de Prazo/Data de publicacao, que
+        chega por ajax e pode recalcular inicio e fim. Escrever as datas antes
+        dela voltar seria desfeito em silencio.
+        """
+        with contextlib.suppress(TimeoutException):
+            self.wait.until(lambda d: d.execute_script(
+                "return !window.jQuery || window.jQuery.active === 0;"
+            ))
+
+    def _selecionar_tipo(self, tarefa: "config.Tarefa") -> None:
+        """Escolhe o tipo na arvore do lookup, se ele nao for o que ja vem.
+
+        A arvore tem os subtipos escondidos ate o pai ser expandido, e cada
+        linha tem o id do tipo (tr#tipo_4, tr#subtipo_9). Digitar o texto no
+        campo nao serve: como no status, so o clique na linha vincula o id.
+        """
+        if not tarefa.tipo_id:
+            # Tarefa que nao passou pela checagem: so confere o que ja vem, como
+            # ate a 1.8 — nunca escolhe um tipo que ninguem conferiu.
+            texto = self.driver.find_element(By.ID, "TipoText").get_attribute("value")
+            if texto != tarefa.tipo:
+                raise RuntimeError(
+                    f"Tipo padrao mudou: esperava {tarefa.tipo!r}, veio {texto!r}"
+                )
+            return
+        atual = self.driver.find_element(By.ID, "TipoId").get_attribute("value")
+        if atual == tarefa.tipo_id:
+            return
+
+        botao = self.wait.until(EC.element_to_be_clickable((
+            By.CSS_SELECTOR, "#lookup_tipo .lookup-button.lookup-show"
+        )))
+        self.driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});", botao
+        )
+        botao.click()
+        linha = self.wait.until(EC.presence_of_element_located((
+            By.CSS_SELECTOR, f"tr[id='{tarefa.tipo_id}']"
+        )))
+        if not linha.is_displayed():
+            # Subtipo: o pai vem recolhido. A classe child-of-<pai> diz qual e.
+            pai = next((c.removeprefix("child-of-")
+                        for c in (linha.get_attribute("class") or "").split()
+                        if c.startswith("child-of-")), "")
+            if not pai:
+                raise RuntimeError(
+                    f"tipo {tarefa.tipo_id} escondido e sem pai na arvore"
+                )
+            self.driver.find_element(
+                By.CSS_SELECTOR, f"tr[id='{pai}'] .expander"
+            ).click()
+            self.wait.until(lambda d: linha.is_displayed())
+        linha.find_element(By.TAG_NAME, "td").click()
+
+        self.wait.until(lambda d: d.find_element(By.ID, "TipoId")
+                        .get_attribute("value") == tarefa.tipo_id)
+        self._esperar_ajax()
+
+    def _conferir_datas(self, tarefa: "config.Tarefa") -> None:
+        """Confere, logo antes do Salvar, que as datas sao as pedidas.
+
+        Subtipo com contagem de prazo recalcula inicio e fim por conta propria.
+        Uma tarefa gravada com data diferente da pedida e pior do que um erro,
+        porque passa por cadastro certo.
+        """
+        pedidas = {"DtInicial": tarefa.data_inicio, "DtFinal": tarefa.data_fim,
+                   "HrInicio": tarefa.hora_inicio, "HrFinal": tarefa.hora_fim}
+        for campo, valor in pedidas.items():
+            if valor is None:
+                continue
+            atual = self.driver.find_element(By.ID, campo).get_attribute("value")
+            if atual != valor:
+                raise RuntimeError(
+                    f"o formulario trocou {campo}: pedi {valor!r}, ficou {atual!r}"
+                )
+
+    # --- listas para a checagem do inicio da rodada ---------------------------
+
+    URL_TIPOS = "/config/TipoAndamentoCompromissoTarefa/LookupTreeTiposTarefa"
+    # O mesmo endereco que o campo Nome dos envolvidos usa. Sem pageSize o
+    # Legal One responde 500.
+    URL_USUARIOS = ("/config/Usuarios/LookupGridUsuario"
+                    "?ativosOnly=True&pageSize=50&term={}")
+
+    def _buscar_json(self, caminho: str) -> dict:
+        """GET num endpoint de lookup, com a sessao do Chrome.
+
+        Vai por fetch dentro da pagina, e nao pelo Python, porque e a sessao do
+        navegador que esta logada. Por isso a aba precisa estar no Legal One.
+        """
+        if not self.driver.current_url.startswith(config.BASE_URL):
+            self._ir_para(config.BASE_URL)
+        resposta = self.driver.execute_async_script("""
+        const [url, fim] = arguments;
+        fetch(url, {credentials: 'same-origin',
+                    headers: {'X-Requested-With': 'XMLHttpRequest'}})
+          .then(r => r.text().then(t => fim({status: r.status, url: r.url, texto: t})))
+          .catch(e => fim({status: 0, url: '', texto: String(e)}));
+        """, caminho)
+        final = (resposta.get("url") or "").lower()
+        if "login" in final or "account/signin" in final:
+            raise SessaoExpirada(
+                "O Legal One redirecionou para a tela de login. "
+                "Faca login no Chrome e repita o comando."
+            )
+        if resposta.get("status") != 200:
+            raise RuntimeError(
+                f"{caminho} respondeu {resposta.get('status')}: "
+                f"{(resposta.get('texto') or '')[:200]}"
+            )
+        try:
+            return json.loads(resposta["texto"])
+        except ValueError:
+            raise RuntimeError(f"{caminho} nao devolveu JSON")
+
+    def listar_tipos(self) -> list["catalogo.Tipo"]:
+        """A arvore inteira de tipos e subtipos de tarefa (~850 itens)."""
+        return catalogo.tipos_da_arvore(self._buscar_json(self.URL_TIPOS)["Rows"])
+
+    def buscar_usuarios(self, termo: str) -> list[str]:
+        """Nomes dos usuarios ativos que a busca do Legal One casa com o termo.
+
+        So o nome sai daqui: a resposta traz tambem CPF e e-mail, que a
+        automacao nao usa e nao devem parar em log.
+        """
+        dados = self._buscar_json(
+            self.URL_USUARIOS.format(urllib.parse.quote(termo))
+        )
+        return [str(linha["ContatoNome"]) for linha in dados.get("Rows", [])]
 
     def _preencher_descricao(self, descricao: str) -> None:
         """Digita a descricao, repetindo se o formulario apagar o texto.
@@ -596,13 +742,9 @@ class AutomadorLegalOne:
 
         self._preencher_descricao(tarefa.descricao)
 
-        # O tipo ja vem certo do formulario; confirmamos em vez de reescrever,
-        # para nao desfazer o vinculo de TipoId.
-        tipo = self.driver.find_element(By.ID, "TipoText").get_attribute("value")
-        if tipo != tarefa.tipo:
-            raise RuntimeError(
-                f"Tipo padrao mudou: esperava {tarefa.tipo!r}, veio {tipo!r}"
-            )
+        # O tipo vem antes das datas: um subtipo com contagem de prazo recalcula
+        # inicio e fim, e as datas pedidas tem que ser escritas por cima disso.
+        self._selecionar_tipo(tarefa)
 
         self._preencher_data("DtInicial", tarefa.data_inicio)
         self._preencher_data("DtFinal", tarefa.data_fim)
@@ -613,9 +755,8 @@ class AutomadorLegalOne:
         if tarefa.hora_fim:
             self._preencher_data("HrFinal", tarefa.hora_fim)
         self._selecionar_status(tarefa.status)
-        self._preencher_responsavel(
-            tarefa.responsavel_busca, tarefa.responsavel_esperado
-        )
+        self._preencher_responsavel(tarefa.responsavel)
+        self._conferir_datas(tarefa)
 
         erros = self._erros_de_validacao()
         if erros:

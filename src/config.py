@@ -75,15 +75,20 @@ class PerfilTarefa:
 
     nome: str               # como se escreve em --tarefa
     descricao: str          # vai no campo Descricao da tarefa
-    tipo: str = "Diversos"  # ja e o padrao do formulario (TipoId=tipo_4)
+    # Caminho na arvore de tipos do Legal One: "Diversos" (tipo) ou "Diversos /
+    # Contato Telefônico" (subtipo). O nome sozinho tambem vale quando e unico.
+    # Diversos ja e o padrao do formulario (TipoId=tipo_4) e nao e reescolhido.
+    tipo: str = "Diversos"
     status: str = "Cumprido"  # StatusId=1; o padrao do formulario e Pendente (0)
-    # O lookup de envolvido busca por prefixo; o nome completo confirma que veio
-    # a pessoa certa antes de salvar.
-    responsavel_busca: str = "Heloiza"
-    responsavel_esperado: str = "Heloiza Helena de Araujo"
+    # Usuario ativo do Legal One. Casa sem ligar para acento e caixa, e pode ser
+    # so parte do nome enquanto for o unico usuario que casa (ver catalogo).
+    responsavel: str = "Heloiza Helena de Araujo"
     # Trecho que deve aparecer no caminho da planilha. Serve de trava contra
     # rodar a planilha de uma tarefa com o perfil da outra. Vazio = sem trava.
     dica_arquivo: str = ""
+    # Preenchido pela checagem do inicio da rodada, junto com tipo e responsavel
+    # reescritos como o Legal One os escreve. Vazio = ainda nao conferido.
+    tipo_id: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -97,10 +102,9 @@ class Tarefa:
     """
 
     descricao: str
-    tipo: str
+    tipo: str                       # caminho, como o Legal One o escreve
     status: str
-    responsavel_busca: str
-    responsavel_esperado: str
+    responsavel: str                # nome completo do usuario no Legal One
     data_inicio: str                # DD/MM/AAAA
     data_fim: str                   # DD/MM/AAAA
     # None deixa a hora que o formulario sugere, que e a proxima hora cheia (as
@@ -112,6 +116,9 @@ class Tarefa:
     # mesmo assim?"). So se responde Sim quando a data foi escolhida de
     # proposito; a data de hoje que virou ontem durante o cadastro nao conta.
     confirmar_data_passada: bool = False
+    # Id na arvore de tipos ("tipo_4", "subtipo_9"). Vazio quando o tipo nao
+    # passou pela checagem: ai o formulario so confere o tipo que ja vem nele.
+    tipo_id: str = ""
 
     @classmethod
     def do_perfil(cls, perfil: PerfilTarefa, data: str,
@@ -121,11 +128,11 @@ class Tarefa:
             descricao=perfil.descricao,
             tipo=perfil.tipo,
             status=perfil.status,
-            responsavel_busca=perfil.responsavel_busca,
-            responsavel_esperado=perfil.responsavel_esperado,
+            responsavel=perfil.responsavel,
             data_inicio=data,
             data_fim=data,
             confirmar_data_passada=confirmar_data_passada,
+            tipo_id=perfil.tipo_id,
         )
 
     @property
