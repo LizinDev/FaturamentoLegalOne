@@ -1,7 +1,7 @@
 # Dependencias do cadastro em lote de tarefas no Legal One
 
 # Selenium — conecta ao Chrome ja aberto via debuggerAddress
-selenium==4.41.0
+selenium==4.49.0
 
 # Leitura da planilha de cobrancas (.xlsx)
 openpyxl==3.1.5
